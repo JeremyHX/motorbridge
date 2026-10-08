@@ -1,6 +1,7 @@
 use motor_core::bus::{CanBus, CanFrame};
 use motor_core::device::MotorDevice;
 use motor_core::error::{MotorError, Result};
+use motor_core::feedback::{FeedbackCache, FeedbackSnapshot};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -48,6 +49,7 @@ pub struct HexfellowMotor {
     bus: Arc<dyn CanBus>,
     sdo_reply_queue: Mutex<VecDeque<[u8; 8]>>,
     heartbeat_state: Mutex<Option<u8>>,
+    state: FeedbackCache<HexfellowStatus>,
 }
 
 impl HexfellowMotor {
@@ -69,6 +71,7 @@ impl HexfellowMotor {
             bus,
             sdo_reply_queue: Mutex::new(VecDeque::new()),
             heartbeat_state: Mutex::new(None),
+            state: FeedbackCache::new(),
         })
     }
 
@@ -321,14 +324,24 @@ impl HexfellowMotor {
             .lock()
             .map_err(|_| MotorError::Io("heartbeat lock poisoned".to_string()))?
             .to_owned();
-        Ok(HexfellowStatus {
+        let state = HexfellowStatus {
             mode_display,
             statusword,
             position_rev: q21_to_rev(pos_q21),
             velocity_rev_s: q21_to_rev(vel_q21),
             torque_permille: tau_permille,
             heartbeat_state: hb,
-        })
+        };
+        self.state.update(state)?;
+        Ok(state)
+    }
+
+    pub fn latest_state(&self) -> Option<HexfellowStatus> {
+        self.latest_state_snapshot().map(|snapshot| snapshot.state)
+    }
+
+    pub fn latest_state_snapshot(&self) -> Option<FeedbackSnapshot<HexfellowStatus>> {
+        self.state.latest().ok().flatten()
     }
 }
 
@@ -380,5 +393,71 @@ impl MotorDevice for HexfellowMotor {
                 .replace(frame.data[0]);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use motor_core::test_support::MockBus;
+
+    fn sdo_reply(index: u16, command: u8, value: [u8; 4]) -> CanFrame {
+        CanFrame {
+            arbitration_id: 0x581,
+            data: [
+                command,
+                index as u8,
+                (index >> 8) as u8,
+                0,
+                value[0],
+                value[1],
+                value[2],
+                value[3],
+            ],
+            dlc: 8,
+            is_extended: false,
+            is_rx: true,
+        }
+    }
+
+    #[test]
+    fn completed_status_query_advances_one_snapshot() {
+        let bus: Arc<dyn CanBus> = Arc::new(MockBus::new());
+        let motor = HexfellowMotor::new(1, 0, "hexfellow", bus).expect("create motor");
+        for frame in [
+            sdo_reply(0x6061, 0x4F, [5, 0, 0, 0]),
+            sdo_reply(0x6041, 0x4B, [0x34, 0x12, 0, 0]),
+            sdo_reply(0x6064, 0x43, rev_to_q21(1.0).to_le_bytes()),
+            sdo_reply(0x606C, 0x43, rev_to_q21(0.5).to_le_bytes()),
+            sdo_reply(0x6077, 0x4B, [250, 0, 0, 0]),
+        ] {
+            motor
+                .process_feedback_frame(frame)
+                .expect("queue SDO reply");
+        }
+
+        let state = motor
+            .query_status(Duration::from_millis(1))
+            .expect("status query");
+        assert_eq!(state.mode_display, 5);
+        assert_eq!(state.statusword, 0x1234);
+        assert_eq!(state.position_rev, 1.0);
+        assert_eq!(state.velocity_rev_s, 0.5);
+        assert_eq!(state.torque_permille, 250);
+        let first = motor.latest_state_snapshot().expect("first snapshot");
+        assert_eq!(first.sequence, 1);
+
+        motor
+            .process_feedback_frame(CanFrame {
+                arbitration_id: 0x701,
+                data: [5, 0, 0, 0, 0, 0, 0, 0],
+                dlc: 1,
+                is_extended: false,
+                is_rx: true,
+            })
+            .expect("heartbeat");
+        let after_heartbeat = motor.latest_state_snapshot().expect("snapshot remains");
+        assert_eq!(after_heartbeat.sequence, first.sequence);
+        assert_eq!(after_heartbeat.received_at, first.received_at);
     }
 }

@@ -56,6 +56,13 @@ Common control/state APIs:
 - `motor_handle_set_can_timeout_ms`
 - `motor_handle_store_parameters`
 - `motor_handle_get_state`
+- `motor_handle_get_state_snapshot`
+
+`motor_handle_get_state_snapshot` returns the same state as
+`motor_handle_get_state` plus its age in nanoseconds and a per-motor sequence
+number. The age uses the host monotonic clock. The sequence advances only when
+MotorBridge processes a complete state update; parameter, ping, and fault-only
+replies do not make cached feedback appear fresh.
 
 ## Vendor Entry Points
 

@@ -3,10 +3,10 @@ from __future__ import annotations
 import ctypes
 from ctypes import c_float, c_int8, c_uint8, c_uint16, c_uint32
 
-from .abi import CState, get_abi
+from .abi import CState, CStateMetadata, get_abi
 from .dm_device_runtime import ensure_dm_device_runtime
 from .errors import CallError
-from .models import Mode, MotorState
+from .models import Mode, MotorState, MotorStateSnapshot
 
 
 def _err_text() -> str:
@@ -409,4 +409,30 @@ class Motor:
             torq=float(st.torq),
             t_mos=float(st.t_mos),
             t_rotor=float(st.t_rotor),
+        )
+
+    def get_state_snapshot(self) -> MotorStateSnapshot | None:
+        state = CState()
+        metadata = CStateMetadata()
+        _ok(
+            self._abi.lib.motor_handle_get_state_snapshot(
+                self._require_open(), ctypes.byref(state), ctypes.byref(metadata)
+            ),
+            "get_state_snapshot",
+        )
+        if not state.has_value:
+            return None
+        return MotorStateSnapshot(
+            state=MotorState(
+                can_id=int(state.can_id),
+                arbitration_id=int(state.arbitration_id),
+                status_code=int(state.status_code),
+                pos=float(state.pos),
+                vel=float(state.vel),
+                torq=float(state.torq),
+                t_mos=float(state.t_mos),
+                t_rotor=float(state.t_rotor),
+            ),
+            feedback_age_s=int(metadata.feedback_age_ns) / 1_000_000_000,
+            feedback_sequence=int(metadata.feedback_sequence),
         )

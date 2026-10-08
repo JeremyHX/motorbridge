@@ -4,7 +4,8 @@ use crate::protocol::{
 use motor_core::bus::{CanBus, CanFrame};
 use motor_core::device::MotorDevice;
 use motor_core::error::{MotorError, Result};
-use std::sync::{Arc, Mutex};
+use motor_core::feedback::{FeedbackCache, FeedbackSnapshot};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub struct HightorqueMotor {
@@ -12,7 +13,7 @@ pub struct HightorqueMotor {
     feedback_id: u16,
     model: String,
     bus: Arc<dyn CanBus>,
-    state: Mutex<Option<HightorqueFeedbackState>>,
+    state: FeedbackCache<HightorqueFeedbackState>,
 }
 
 impl HightorqueMotor {
@@ -22,12 +23,16 @@ impl HightorqueMotor {
             feedback_id,
             model: model.to_string(),
             bus,
-            state: Mutex::new(None),
+            state: FeedbackCache::new(),
         }
     }
 
     pub fn latest_state(&self) -> Option<HightorqueFeedbackState> {
-        self.state.lock().ok().and_then(|g| *g)
+        self.latest_state_snapshot().map(|snapshot| snapshot.state)
+    }
+
+    pub fn latest_state_snapshot(&self) -> Option<FeedbackSnapshot<HightorqueFeedbackState>> {
+        self.state.latest().ok().flatten()
     }
 
     pub fn enable(&self) -> Result<()> {
@@ -142,9 +147,7 @@ impl HightorqueMotor {
             if let Some(frame) = self.bus.recv(left.min(Duration::from_millis(20)))? {
                 if let Some(state) = decode_read_reply(frame) {
                     if state.can_id as u16 == self.motor_id {
-                        if let Ok(mut g) = self.state.lock() {
-                            *g = Some(state);
-                        }
+                        self.state.update(state)?;
                         return Ok(());
                     }
                 }
@@ -199,11 +202,45 @@ impl MotorDevice for HightorqueMotor {
             if state.can_id as u16 != self.motor_id {
                 return Ok(());
             }
-            self.state
-                .lock()
-                .map_err(|_| MotorError::Io("state lock poisoned".to_string()))?
-                .replace(state);
+            self.state.update(state)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use motor_core::test_support::MockBus;
+
+    #[test]
+    fn only_decoded_status_advances_the_snapshot() {
+        let bus: Arc<dyn CanBus> = Arc::new(MockBus::new());
+        let motor = HightorqueMotor::new(1, 1, "hightorque", bus);
+
+        motor
+            .process_feedback_frame(CanFrame {
+                arbitration_id: 1,
+                data: [0x27, 0x01, 0, 0, 0, 0, 0, 0],
+                dlc: 8,
+                is_extended: true,
+                is_rx: true,
+            })
+            .expect("status feedback");
+        let first = motor.latest_state_snapshot().expect("first snapshot");
+        assert_eq!(first.sequence, 1);
+
+        motor
+            .process_feedback_frame(CanFrame {
+                arbitration_id: 1,
+                data: [0x01, 0, 0, 0, 0, 0, 0, 0],
+                dlc: 8,
+                is_extended: true,
+                is_rx: true,
+            })
+            .expect("non-state frame");
+        let after_non_state = motor.latest_state_snapshot().expect("snapshot remains");
+        assert_eq!(after_non_state.sequence, first.sequence);
+        assert_eq!(after_non_state.received_at, first.received_at);
     }
 }

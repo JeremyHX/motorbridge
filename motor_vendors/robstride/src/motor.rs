@@ -8,6 +8,7 @@ use crate::registers::{parameter_info, ParameterDataType, ParameterId};
 use motor_core::bus::{CanBus, CanFrame};
 use motor_core::device::MotorDevice;
 use motor_core::error::{MotorError, Result};
+use motor_core::feedback::{FeedbackCache, FeedbackSnapshot};
 use motor_core::model::{ModelCatalog, MotorModelSpec, PvTLimits, StaticModelCatalog};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -151,9 +152,8 @@ pub struct RobstrideMotor {
     limits: PvTLimits,
     kp_max: f32,
     kd_max: f32,
-    state: Mutex<Option<MotorFeedbackState>>,
+    state: FeedbackCache<MotorFeedbackState>,
     fault_report: Mutex<Option<FaultReport>>,
-    status_seq: AtomicU64,
     response_seq: AtomicU64,
     param_state: Mutex<ParameterState>,
     ping_reply: Mutex<Option<PingReply>>,
@@ -186,9 +186,8 @@ impl RobstrideMotor {
             limits: PvTLimits::from_spec(spec),
             kp_max,
             kd_max,
-            state: Mutex::new(None),
+            state: FeedbackCache::new(),
             fault_report: Mutex::new(None),
-            status_seq: AtomicU64::new(0),
             response_seq: AtomicU64::new(0),
             param_state: Mutex::new(ParameterState::default()),
             ping_reply: Mutex::new(None),
@@ -258,11 +257,11 @@ impl RobstrideMotor {
         let cands = self.host_id_candidates();
         let per_try = Duration::from_millis((timeout.as_millis() as u64).max(120));
         for host in cands {
-            let start_seq = self.status_seq.load(Ordering::Acquire);
+            let start_seq = self.state.sequence()?;
             self.send_ext(comm_type, host, data, dlc)?;
             let deadline = Instant::now() + per_try;
             while Instant::now() < deadline {
-                if self.status_seq.load(Ordering::Acquire) > start_seq {
+                if self.state.sequence()? > start_seq {
                     return Ok(());
                 }
                 std::thread::sleep(Duration::from_millis(4));
@@ -761,7 +760,11 @@ impl RobstrideMotor {
     }
 
     pub fn latest_state(&self) -> Option<MotorFeedbackState> {
-        self.state.lock().ok().and_then(|s| *s)
+        self.latest_state_snapshot().map(|snapshot| snapshot.state)
+    }
+
+    pub fn latest_state_snapshot(&self) -> Option<FeedbackSnapshot<MotorFeedbackState>> {
+        self.state.latest().ok().flatten()
     }
 
     pub fn latest_fault_report(&self) -> Option<FaultReport> {
@@ -820,26 +823,21 @@ impl RobstrideMotor {
                     self.limits.v_max,
                     self.limits.t_max,
                 );
-                self.state
-                    .lock()
-                    .map_err(|_| MotorError::Io("state lock poisoned".to_string()))?
-                    .replace(MotorFeedbackState {
-                        arbitration_id: frame.arbitration_id,
-                        device_id: status.flags.device_id,
-                        mode_state: status.flags.mode_state,
-                        position: status.position,
-                        velocity: status.velocity,
-                        torque: status.torque,
-                        temperature_c: status.temperature_c,
-                        uncalibrated: status.flags.uncalibrated,
-                        stall: status.flags.stall,
-                        magnetic_encoder_fault: status.flags.magnetic_encoder_fault,
-                        overtemperature: status.flags.overtemperature,
-                        overcurrent: status.flags.overcurrent,
-                        undervoltage: status.flags.undervoltage,
-                    });
-                self.status_seq.fetch_add(1, Ordering::Release);
-                Ok(())
+                self.state.update(MotorFeedbackState {
+                    arbitration_id: frame.arbitration_id,
+                    device_id: status.flags.device_id,
+                    mode_state: status.flags.mode_state,
+                    position: status.position,
+                    velocity: status.velocity,
+                    torque: status.torque,
+                    temperature_c: status.temperature_c,
+                    uncalibrated: status.flags.uncalibrated,
+                    stall: status.flags.stall,
+                    magnetic_encoder_fault: status.flags.magnetic_encoder_fault,
+                    overtemperature: status.flags.overtemperature,
+                    overcurrent: status.flags.overcurrent,
+                    undervoltage: status.flags.undervoltage,
+                })
             }
             CommunicationType::FAULT_REPORT => {
                 self.fault_report
@@ -1008,8 +1006,9 @@ mod tests {
                 is_rx: true,
             })
             .expect("status frame");
-        let before = motor.latest_state().expect("state from status");
-        let seq_before = motor.status_seq.load(Ordering::Acquire);
+        let before = motor
+            .latest_state_snapshot()
+            .expect("state snapshot from status");
 
         motor
             .process_feedback_frame(CanFrame {
@@ -1021,14 +1020,16 @@ mod tests {
             })
             .expect("fault frame");
 
-        let after = motor.latest_state().expect("state should remain");
-        let seq_after = motor.status_seq.load(Ordering::Acquire);
-        assert_eq!(after.arbitration_id, before.arbitration_id);
-        assert_eq!(after.position, before.position);
-        assert_eq!(after.velocity, before.velocity);
-        assert_eq!(after.torque, before.torque);
-        assert_eq!(after.temperature_c, before.temperature_c);
-        assert_eq!(seq_after, seq_before);
+        let after = motor
+            .latest_state_snapshot()
+            .expect("state snapshot should remain");
+        assert_eq!(after.state.arbitration_id, before.state.arbitration_id);
+        assert_eq!(after.state.position, before.state.position);
+        assert_eq!(after.state.velocity, before.state.velocity);
+        assert_eq!(after.state.torque, before.state.torque);
+        assert_eq!(after.state.temperature_c, before.state.temperature_c);
+        assert_eq!(after.sequence, before.sequence);
+        assert_eq!(after.received_at, before.received_at);
 
         let fault = motor.latest_fault_report().expect("fault report");
         assert_eq!(fault.fault_raw, 0);

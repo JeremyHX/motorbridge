@@ -20,3 +20,10 @@ class MotorState:
     torq: float
     t_mos: float
     t_rotor: float
+
+
+@dataclass(frozen=True)
+class MotorStateSnapshot:
+    state: MotorState
+    feedback_age_s: float
+    feedback_sequence: int

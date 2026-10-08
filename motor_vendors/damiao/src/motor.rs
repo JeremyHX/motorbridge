@@ -9,6 +9,7 @@ use crate::registers::{register_info, RegisterAccess, RegisterDataType};
 use motor_core::bus::{CanBus, CanFrame};
 use motor_core::device::MotorDevice;
 use motor_core::error::{MotorError, Result};
+use motor_core::feedback::{FeedbackCache, FeedbackSnapshot};
 use motor_core::model::{ModelCatalog, MotorModelSpec, PvTLimits, StaticModelCatalog};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -244,7 +245,7 @@ pub struct DamiaoMotor {
     pub model: String,
     bus: Arc<dyn CanBus>,
     limits: PvTLimits,
-    state: Mutex<Option<(MotorFeedbackState, Instant)>>,
+    state: FeedbackCache<MotorFeedbackState>,
     // Software-side guard for set-zero sequencing:
     // set_zero_position() is allowed only after disable() was issued.
     disabled_hint: AtomicBool,
@@ -324,7 +325,7 @@ impl DamiaoMotor {
             model: model.to_string(),
             bus,
             limits: PvTLimits::from_spec(spec),
-            state: Mutex::new(None),
+            state: FeedbackCache::new(),
             disabled_hint: AtomicBool::new(true),
             register_cache: Mutex::new(RegisterCache::default()),
         })
@@ -739,10 +740,11 @@ impl DamiaoMotor {
     }
 
     pub fn latest_state(&self) -> Option<MotorFeedbackState> {
-        self.state
-            .lock()
-            .ok()
-            .and_then(|s| s.map(|(state, _)| state))
+        self.latest_state_snapshot().map(|snapshot| snapshot.state)
+    }
+
+    pub fn latest_state_snapshot(&self) -> Option<FeedbackSnapshot<MotorFeedbackState>> {
+        self.state.latest().ok().flatten()
     }
 
     pub fn request_fresh_state(&self, timeout: Duration) -> Result<Option<MotorFeedbackState>> {
@@ -750,15 +752,9 @@ impl DamiaoMotor {
         self.request_motor_feedback()?;
         let deadline = request_at + timeout;
         loop {
-            if let Some((state, ts)) = self
-                .state
-                .lock()
-                .map_err(|_| MotorError::Io("state lock poisoned".to_string()))?
-                .as_ref()
-                .copied()
-            {
-                if ts >= request_at {
-                    return Ok(Some(state));
+            if let Some(snapshot) = self.state.latest()? {
+                if snapshot.received_at >= request_at {
+                    return Ok(Some(snapshot.state));
                 }
             }
             if Instant::now() >= deadline {
@@ -827,11 +823,7 @@ impl DamiaoMotor {
             t_mos: decoded.t_mos,
             t_rotor: decoded.t_rotor,
         };
-        self.state
-            .lock()
-            .map_err(|_| MotorError::Io("state lock poisoned".to_string()))?
-            .replace((state, Instant::now()));
-        Ok(())
+        self.state.update(state)
     }
     pub fn get_register_f32(&self, rid: u8, timeout: Duration) -> Result<f32> {
         match self.wait_for_register_value(rid, timeout)? {
@@ -914,6 +906,54 @@ mod tests {
         let suggested = suggest_models_by_limits(12.5, 9.9, 28.1, 3);
         assert!(!suggested.is_empty());
         assert!(suggested[0] == "4340" || suggested[0] == "4340P");
+    }
+
+    #[test]
+    fn only_sensor_feedback_advances_the_snapshot() {
+        let bus: Arc<dyn CanBus> = Arc::new(MockBus::new());
+        let motor = DamiaoMotor::new(0x01, 0x11, "4340P", bus).expect("create motor");
+
+        motor
+            .process_feedback_frame_impl(CanFrame {
+                arbitration_id: 0x11,
+                data: [0x01, 0, 0, 0, 0, 0, 0, 0],
+                dlc: 8,
+                is_extended: false,
+                is_rx: true,
+            })
+            .expect("sensor feedback");
+        let first = motor.latest_state_snapshot().expect("first snapshot");
+        assert_eq!(first.sequence, 1);
+
+        motor
+            .process_feedback_frame_impl(CanFrame {
+                arbitration_id: 0x11,
+                data: [0x01, 0x01, 0x33, 10, 1, 0, 0, 0],
+                dlc: 8,
+                is_extended: false,
+                is_rx: true,
+            })
+            .expect("register reply");
+        let after_register = motor.latest_state_snapshot().expect("snapshot remains");
+        assert_eq!(after_register.sequence, first.sequence);
+        assert_eq!(after_register.received_at, first.received_at);
+
+        motor
+            .process_feedback_frame_impl(CanFrame {
+                arbitration_id: 0x11,
+                data: [0x01, 0, 0, 0, 0, 0, 0, 0],
+                dlc: 8,
+                is_extended: false,
+                is_rx: true,
+            })
+            .expect("second sensor feedback");
+        assert_eq!(
+            motor
+                .latest_state_snapshot()
+                .expect("second snapshot")
+                .sequence,
+            2
+        );
     }
 
     #[test]

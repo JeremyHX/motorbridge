@@ -145,6 +145,9 @@ Packaging note:
   - HighTorque: `add_hightorque_motor(...)`
 - Unified state-query pattern:
   - Recommended flow: `request_feedback() -> poll_feedback_once() -> get_state()`.
+  - Use `get_state_snapshot()` when control or safety logic also needs the
+    feedback age and sequence number. It returns `None` until state feedback is
+    available.
   - RobStride has no single-shot private-protocol status request; `request_feedback()` is a non-blocking no-op for RobStride. Use `robstride_ping()` for connectivity, active report for streaming state, or typed parameter reads for fresh position/velocity values.
 
 ## Unified Mode Mapping Summary (Top-Level -> Vendor Native)
@@ -173,7 +176,9 @@ with Controller("can0") as ctrl:
     ctrl.enable_all()
     motor.ensure_mode(Mode.MIT, 1000)
     motor.send_mit(0.0, 0.0, 20.0, 1.0, 0.0)
-    print(motor.get_state())
+    snapshot = motor.get_state_snapshot()
+    if snapshot is not None:
+        print(snapshot.state, snapshot.feedback_age_s, snapshot.feedback_sequence)
     motor.close()
 ```
 

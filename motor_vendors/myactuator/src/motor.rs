@@ -6,6 +6,7 @@ use crate::protocol::{
 use motor_core::bus::{CanBus, CanFrame};
 use motor_core::device::MotorDevice;
 use motor_core::error::{MotorError, Result};
+use motor_core::feedback::{FeedbackCache, FeedbackSnapshot};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,7 +32,7 @@ pub struct MyActuatorMotor {
     pub feedback_id: u16,
     pub model: String,
     bus: Arc<dyn CanBus>,
-    state: Mutex<Option<MyActuatorFeedbackState>>,
+    state: FeedbackCache<MyActuatorFeedbackState>,
     multi_turn_angle_deg: Mutex<Option<f32>>,
     version_date: Mutex<Option<u32>>,
     control_mode: Mutex<Option<u8>>,
@@ -55,7 +56,7 @@ impl MyActuatorMotor {
             feedback_id: effective_feedback_id,
             model: model.to_string(),
             bus,
-            state: Mutex::new(None),
+            state: FeedbackCache::new(),
             multi_turn_angle_deg: Mutex::new(None),
             version_date: Mutex::new(None),
             control_mode: Mutex::new(None),
@@ -73,7 +74,11 @@ impl MyActuatorMotor {
     }
 
     pub fn latest_state(&self) -> Option<MyActuatorFeedbackState> {
-        self.state.lock().ok().and_then(|s| *s)
+        self.latest_state_snapshot().map(|snapshot| snapshot.state)
+    }
+
+    pub fn latest_state_snapshot(&self) -> Option<FeedbackSnapshot<MyActuatorFeedbackState>> {
+        self.state.latest().ok().flatten()
     }
 
     pub fn latest_version_date(&self) -> Option<u32> {
@@ -158,17 +163,14 @@ impl MyActuatorMotor {
     fn process_feedback_frame_impl(&self, frame: CanFrame) -> Result<()> {
         match decode_frame(frame.data)? {
             DecodedFrame::Feedback(fb) => {
-                self.state
-                    .lock()
-                    .map_err(|_| MotorError::Io("state lock poisoned".to_string()))?
-                    .replace(MyActuatorFeedbackState {
-                        arbitration_id: frame.arbitration_id,
-                        command: fb.command,
-                        temperature_c: fb.temperature_c,
-                        current_a: fb.current_a,
-                        speed_dps: fb.speed_dps,
-                        shaft_angle_deg: fb.shaft_angle_deg,
-                    });
+                self.state.update(MyActuatorFeedbackState {
+                    arbitration_id: frame.arbitration_id,
+                    command: fb.command,
+                    temperature_c: fb.temperature_c,
+                    current_a: fb.current_a,
+                    speed_dps: fb.speed_dps,
+                    shaft_angle_deg: fb.shaft_angle_deg,
+                })?;
             }
             DecodedFrame::MultiTurnAngleDeg(angle_deg) => {
                 self.multi_turn_angle_deg
@@ -225,5 +227,42 @@ impl MotorDevice for MyActuatorMotor {
 
     fn process_feedback_frame(&self, frame: CanFrame) -> Result<()> {
         self.process_feedback_frame_impl(frame)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use motor_core::test_support::MockBus;
+
+    #[test]
+    fn only_motion_feedback_advances_the_snapshot() {
+        let bus: Arc<dyn CanBus> = Arc::new(MockBus::new());
+        let motor = MyActuatorMotor::new(1, 0, "X8", bus).expect("create motor");
+
+        motor
+            .process_feedback_frame_impl(CanFrame {
+                arbitration_id: response_arbitration_id(1),
+                data: [Command::ReadMotorStatus2 as u8, 25, 0, 0, 0, 0, 0, 0],
+                dlc: 8,
+                is_extended: false,
+                is_rx: true,
+            })
+            .expect("status feedback");
+        let first = motor.latest_state_snapshot().expect("first snapshot");
+        assert_eq!(first.sequence, 1);
+
+        motor
+            .process_feedback_frame_impl(CanFrame {
+                arbitration_id: response_arbitration_id(1),
+                data: [Command::ReadVersionDate as u8, 0, 0, 0, 1, 2, 3, 4],
+                dlc: 8,
+                is_extended: false,
+                is_rx: true,
+            })
+            .expect("version reply");
+        let after_version = motor.latest_state_snapshot().expect("snapshot remains");
+        assert_eq!(after_version.sequence, first.sequence);
+        assert_eq!(after_version.received_at, first.received_at);
     }
 }
