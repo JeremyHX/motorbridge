@@ -147,7 +147,8 @@ Packaging note:
   - Recommended flow: `request_feedback() -> poll_feedback_once() -> get_state()`.
   - Use `get_state_snapshot()` when control or safety logic also needs the
     feedback age and sequence number. It returns `None` until state feedback is
-    available.
+    available. Only complete state updates advance the sequence; ping, fault,
+    and parameter replies do not make cached feedback appear fresh.
   - RobStride has no single-shot private-protocol status request; `request_feedback()` is a non-blocking no-op for RobStride. Use `robstride_ping()` for connectivity, active report for streaming state, or typed parameter reads for fresh position/velocity values.
 
 ## Unified Mode Mapping Summary (Top-Level -> Vendor Native)

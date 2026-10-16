@@ -179,3 +179,115 @@ pub extern "C" fn motor_handle_get_state_snapshot(
     }
     0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use motor_core::bus::CanFrame;
+    use motor_core::device::MotorDevice;
+    use motor_core::test_support::MockBus;
+    use motor_vendor_robstride::protocol::{build_ext_id, CommunicationType};
+
+    #[test]
+    fn snapshot_sequence_and_state_follow_received_frames_through_abi() {
+        let motor =
+            Arc::new(RobstrideMotor::new(2, 0xFD, "rs-00", Arc::new(MockBus::new())).unwrap());
+        let mut handle = MotorHandle {
+            inner: Mutex::new(MotorHandleInner::Robstride(motor.clone())),
+        };
+        let mut state = MotorState::default();
+        let mut metadata = MotorStateMetadata {
+            feedback_age_ns: u64::MAX,
+            feedback_sequence: u64::MAX,
+        };
+        assert_eq!(
+            motor_handle_get_state_snapshot(&mut handle, &mut state, &mut metadata),
+            0
+        );
+        assert_eq!(state.has_value, 0);
+        assert_eq!(metadata.feedback_sequence, 0);
+        assert_eq!(metadata.feedback_age_ns, 0);
+
+        let mut expected = 0;
+        for comm_type in [
+            CommunicationType::OPERATION_STATUS,
+            CommunicationType::ACTIVE_REPORT,
+        ] {
+            let frame = CanFrame {
+                arbitration_id: build_ext_id(comm_type, 2, 0xFD),
+                data: [0x90, 0, 0x80, 0, 0x7F, 0xFF, 0x05, 0x78],
+                dlc: 8,
+                is_extended: true,
+                is_rx: true,
+            };
+            for _ in 0..2 {
+                motor.process_feedback_frame(frame).unwrap();
+                expected += 1;
+                metadata = MotorStateMetadata {
+                    feedback_age_ns: u64::MAX,
+                    feedback_sequence: u64::MAX,
+                };
+                assert_eq!(
+                    motor_handle_get_state_snapshot(&mut handle, &mut state, &mut metadata),
+                    0
+                );
+                assert_eq!(state.has_value, 1);
+                assert_eq!(state.can_id, 2);
+                assert_eq!(state.arbitration_id, frame.arbitration_id);
+                assert_eq!(metadata.feedback_sequence, expected);
+                assert!(metadata.feedback_age_ns < u64::MAX);
+            }
+        }
+        for comm_type in [
+            CommunicationType::GET_DEVICE_ID,
+            CommunicationType::READ_PARAMETER,
+            CommunicationType::FAULT_REPORT,
+        ] {
+            motor
+                .process_feedback_frame(CanFrame {
+                    arbitration_id: build_ext_id(comm_type, 2, 0xFD),
+                    data: [0x19, 0x70, 0, 0, 0, 0, 0, 0],
+                    dlc: 8,
+                    is_extended: true,
+                    is_rx: true,
+                })
+                .unwrap();
+            metadata = MotorStateMetadata::default();
+            assert_eq!(
+                motor_handle_get_state_snapshot(&mut handle, &mut state, &mut metadata),
+                0
+            );
+            assert_eq!(state.has_value, 1);
+            assert_eq!(metadata.feedback_sequence, expected);
+        }
+    }
+
+    #[test]
+    fn snapshot_rejects_null_pointers_without_writing_output() {
+        let motor =
+            Arc::new(RobstrideMotor::new(2, 0xFD, "rs-00", Arc::new(MockBus::new())).unwrap());
+        let mut handle = MotorHandle {
+            inner: Mutex::new(MotorHandleInner::Robstride(motor)),
+        };
+        let mut state = MotorState::default();
+        let mut metadata = MotorStateMetadata {
+            feedback_age_ns: 17,
+            feedback_sequence: 17,
+        };
+        assert_eq!(
+            motor_handle_get_state_snapshot(ptr::null_mut(), &mut state, &mut metadata),
+            -1
+        );
+        assert_eq!(metadata.feedback_sequence, 17);
+        assert_eq!(
+            motor_handle_get_state_snapshot(&mut handle, ptr::null_mut(), &mut metadata),
+            -1
+        );
+        assert_eq!(metadata.feedback_sequence, 17);
+        assert_eq!(
+            motor_handle_get_state_snapshot(&mut handle, &mut state, ptr::null_mut()),
+            -1
+        );
+        assert_eq!(state.has_value, 0);
+    }
+}
