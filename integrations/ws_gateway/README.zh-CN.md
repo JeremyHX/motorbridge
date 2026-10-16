@@ -324,7 +324,7 @@ or offline joints return `has_value:false` instead of failing the whole request.
 参数流：
 
 ```json
-{"type":"robstride_params","data":{"vendor":"robstride","motor_id":1,"feedback_id":253,"values":{"mechPos":0.12,"iqf":0.3,"mechVel":0.01,"torque_fdb":0.02}}}
+{"type":"robstride_params","data":{"vendor":"robstride","motor_id":1,"feedback_id":253,"values":{"mechPos":0.12,"iqf":0.3,"mechVel":0.01,"VBUS":24.0}}}
 ```
 
 ## 说明

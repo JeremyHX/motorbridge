@@ -262,7 +262,7 @@ cargo run -p motor_cli --release -- --vendor damiao --channel can0@1000000 --mod
 {"op":"damiao_param_stream","enabled":true,"profile":"realtime","interval_ms":1000,"timeout_ms":80}
 {"op":"robstride_param_stream","enabled":true,"profile":"realtime","interval_ms":1000,"timeout_ms":80}
 {"op":"robstride_param_stream","enabled":true,"profile":"full","interval_ms":3000,"timeout_ms":80}
-{"op":"robstride_param_stream","enabled":true,"params":["0x7019","0x701A","0x701B","0x302C"],"interval_ms":500}
+{"op":"robstride_param_stream","enabled":true,"params":["0x7019","0x701A","0x701B","0x701C"],"interval_ms":500}
 {"op":"store_parameters"}
 {"op":"set_can_timeout_ms","timeout_ms":1000}
 {"op":"write_register_u32","rid":10,"value":1,"verify":true}
@@ -325,7 +325,7 @@ State stream frame:
 RobStride parameter stream frame:
 
 ```json
-{"type":"robstride_params","data":{"vendor":"robstride","motor_id":1,"feedback_id":253,"model":"rs-00","values":{"mechPos":0.12,"iqf":0.3,"mechVel":0.01,"torque_fdb":0.02},"params":[{"param_id":28697,"name":"mechPos","type":"f32","value":0.12,"ok":true}]}}
+{"type":"robstride_params","data":{"vendor":"robstride","motor_id":1,"feedback_id":253,"model":"rs-00","values":{"mechPos":0.12,"iqf":0.3,"mechVel":0.01,"VBUS":24.0},"params":[{"param_id":28697,"name":"mechPos","type":"f32","value":0.12,"ok":true}]}}
 ```
 
 ## Notes

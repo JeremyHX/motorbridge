@@ -525,7 +525,9 @@ Damiao `realtime` profile 默认读取：
 | `80` | `f32` | `p_m` | 电机位置 |
 | `81` | `f32` | `xout` | 输出轴位置 |
 
-RobStride `realtime` profile 默认读取：
+RobStride `realtime` profile 默认读取(仅 type-17 可读的 0x70xx 协议参数;手册中的
+0x30xx 观测参数属上位机串口协议,type-17 读取会被电机拒绝,故不在流中,力矩/温度请
+使用状态流的反馈帧):
 
 | 参数 | 类型 | 名称 | 作用 |
 | --- | --- | --- | --- |
@@ -534,9 +536,6 @@ RobStride `realtime` profile 默认读取：
 | `0x701A` | `f32` | `iqf` | 滤波 Iq 电流 |
 | `0x701B` | `f32` | `mechVel` | 机械速度 |
 | `0x701C` | `f32` | `VBUS` | 母线电压 |
-| `0x3025` | `f32` | `drv_temp` | 驱动温度 |
-| `0x302B` | `f32` | `v_bus` | 母线电压反馈 |
-| `0x302C` | `f32` | `torque_fdb` | 扭矩反馈 |
 
 通用开启方式：
 
@@ -559,7 +558,7 @@ RobStride 专用开启方式：
 自定义曲线参数：
 
 ```json
-{"op":"param_stream","enabled":true,"params":["0x7019","0x701A","0x701B","0x302C"],"interval_ms":500}
+{"op":"param_stream","enabled":true,"params":["0x7019","0x701A","0x701B","0x701C"],"interval_ms":500}
 ```
 
 关闭：
@@ -571,13 +570,13 @@ RobStride 专用开启方式：
 普通响应：
 
 ```json
-{"enabled":true,"vendor":"robstride","interval_ms":1000,"timeout_ms":80,"params":[28677,28697,28698,28699,28700,12325,12331,12332]}
+{"enabled":true,"vendor":"robstride","interval_ms":1000,"timeout_ms":80,"params":[28677,28697,28698,28699,28700]}
 ```
 
 RobStride 周期推送：
 
 ```json
-{"type":"robstride_params","data":{"vendor":"robstride","motor_id":1,"feedback_id":253,"model":"rs-00","values":{"mechPos":-0.82,"iqf":0.31,"mechVel":0.02,"torque_fdb":0.08},"params":[{"param_id":28697,"name":"mechPos","type":"f32","value":-0.82,"ok":true}]}}
+{"type":"robstride_params","data":{"vendor":"robstride","motor_id":1,"feedback_id":253,"model":"rs-00","values":{"mechPos":-0.82,"iqf":0.31,"mechVel":0.02,"VBUS":24.1},"params":[{"param_id":28697,"name":"mechPos","type":"f32","value":-0.82,"ok":true}]}}
 ```
 
 Damiao 周期推送：
