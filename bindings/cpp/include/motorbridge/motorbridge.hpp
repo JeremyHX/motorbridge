@@ -60,6 +60,12 @@ struct State {
   float t_rotor;
 };
 
+struct StateSnapshot {
+  State state;
+  double feedback_age_s;
+  uint64_t feedback_sequence;
+};
+
 struct RegisterSpec {
   uint8_t rid;
   const char* variable;
@@ -357,14 +363,6 @@ class Motor {
     check_rc(motor_handle_damiao_write_param_u32(ptr_, param_id, value), "damiao_write_param_u32");
   }
 
-  // Read before get_state(): identical status/active-report frames still advance this count.
-  uint64_t robstride_feedback_sequence() const {
-    require_open();
-    uint64_t out = 0;
-    check_rc(motor_handle_robstride_feedback_sequence(ptr_, &out), "robstride_feedback_sequence");
-    return out;
-  }
-
   std::optional<State> get_state() const {
     require_open();
     MotorState st{};
@@ -372,6 +370,25 @@ class Motor {
     if (!st.has_value) return std::nullopt;
     return State{
         st.can_id, st.arbitration_id, st.status_code, st.pos, st.vel, st.torq, st.t_mos, st.t_rotor};
+  }
+
+  std::optional<StateSnapshot> get_state_snapshot() const {
+    require_open();
+    MotorState state{};
+    MotorStateMetadata metadata{};
+    check_rc(motor_handle_get_state_snapshot(ptr_, &state, &metadata), "get_state_snapshot");
+    if (!state.has_value) return std::nullopt;
+    return StateSnapshot{
+        State{state.can_id,
+              state.arbitration_id,
+              state.status_code,
+              state.pos,
+              state.vel,
+              state.torq,
+              state.t_mos,
+              state.t_rotor},
+        static_cast<double>(metadata.feedback_age_ns) / 1'000'000'000.0,
+        metadata.feedback_sequence};
   }
 
  private:

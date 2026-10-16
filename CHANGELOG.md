@@ -9,13 +9,27 @@ Versioning.
 
 ### Added
 
-- RobStride `feedback_sequence()` in Rust and `robstride_feedback_sequence()` in
-  Python/C++ count received operation-status and active-report frames, including
-  identical samples. Cached state reads, ping, fault, and parameter replies do
-  not advance the counter. The existing `MotorState` ABI layout is unchanged.
+- `get_state_snapshot()` across all vendors and bindings (Rust
+  `latest_state_snapshot()`/`FeedbackSnapshot<T>`, C ABI
+  `motor_handle_get_state_snapshot`, C++ `Motor::get_state_snapshot()`, Python
+  `Motor.get_state_snapshot()`) returns the cached state together with its age
+  (host monotonic clock; nanoseconds in the C ABI, `feedback_age_s` elsewhere)
+  and a per-motor sequence number. Only complete state updates advance the
+  sequence; parameter, ping, and fault-only replies do not make cached feedback
+  appear fresh. No snapshot is returned until the first complete state update.
+  The existing `get_state()` and `MotorState` ABI layout are unchanged.
 - RobStride: `rs-05el` (EDULITE 05) model — peak 6 N·m, 9:1 gear, 20-pole,
   on the private extended-CAN `robstride` path. Limit ranges: P_MAX=4π (12.57),
   V_MAX=50, T_MAX=6, KP_MAX=500, KD_MAX=5.
+
+### Changed
+
+- Removed the RobStride-only freshness counter added in #25
+  (`robstride_feedback_sequence()` in Python/C++,
+  `motor_handle_robstride_feedback_sequence` in the C ABI, and the
+  `feedback_sequence` Rust getter); its capability is covered by
+  `get_state_snapshot().feedback_sequence` for every vendor. ABI capability
+  `robstride.feedback_sequence` is superseded by `state_snapshot_metadata`.
 
 ### Fixed
 

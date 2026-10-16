@@ -22,6 +22,11 @@ typedef struct MotorState {
   float t_rotor;
 } MotorState;
 
+typedef struct MotorStateMetadata {
+  uint64_t feedback_age_ns;
+  uint64_t feedback_sequence;
+} MotorStateMetadata;
+
 // Unified units across all vendors:
 // - position: rad
 // - velocity: rad/s
@@ -117,8 +122,7 @@ int32_t motor_handle_robstride_get_param_u32(MotorHandle* motor, uint16_t param_
 int32_t motor_handle_robstride_get_param_f32(MotorHandle* motor, uint16_t param_id, uint32_t timeout_ms, float* out_value);
 
 int32_t motor_handle_get_state(MotorHandle* motor, MotorState* out_state);
-/* Read before get_state. Counts received RobStride status/active-report frames, even identical frames. */
-int32_t motor_handle_robstride_feedback_sequence(MotorHandle* motor, uint64_t* out_sequence);
+int32_t motor_handle_get_state_snapshot(MotorHandle* motor, MotorState* out_state, MotorStateMetadata* out_metadata);
 
 int32_t motor_handle_damiao_get_param_f32(MotorHandle* motor, uint16_t param_id, uint32_t timeout_ms, float* out_value);
 int32_t motor_handle_damiao_get_param_u32(MotorHandle* motor, uint16_t param_id, uint32_t timeout_ms, uint32_t* out_value);

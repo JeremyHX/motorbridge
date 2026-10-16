@@ -24,7 +24,7 @@ from .damiao_registers import (
 )
 from .dm_device_runtime import ensure_dm_device_runtime
 from .errors import AbiLoadError, CallError, MotorBridgeError
-from .models import Mode, MotorState
+from .models import Mode, MotorState, MotorStateSnapshot
 from ._version import VERSION
 
 
@@ -44,6 +44,7 @@ __all__ = [
     "Motor",
     "Mode",
     "MotorState",
+    "MotorStateSnapshot",
     "RegisterSpec",
     "DAMIAO_RW_REGISTERS",
     "DAMIAO_HIGH_IMPACT_RIDS",

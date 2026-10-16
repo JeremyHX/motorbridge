@@ -35,10 +35,11 @@ const ABI_CAPABILITIES: &str = r#"{
   "vendors": ["damiao", "robstride", "myactuator", "hexfellow", "hightorque"],
   "features": {
     "state_cache": true,
+    "state_snapshot_metadata": true,
     "controller_lifecycle": ["shutdown", "close_bus", "poll_feedback_once", "enable_all", "disable_all"],
     "control_modes": ["mit", "pos-vel", "vel", "force-pos", "robstride-pos-vel-pp", "robstride-pos-vel-csp"],
     "damiao": ["dm-serial", "dm-device", "register_u32", "register_f32", "param_u32", "param_f32", "set_can_timeout_ms"],
-    "robstride": ["ping", "ping_host_id", "fault_report", "active_report", "feedback_sequence", "device_id", "param_i8", "param_u8", "param_u16", "param_u32", "param_f32", "param_f32_host_id", "pos_vel_pp", "pos_vel_csp"],
+    "robstride": ["ping", "ping_host_id", "fault_report", "active_report", "device_id", "param_i8", "param_u8", "param_u16", "param_u32", "param_f32", "param_f32_host_id", "pos_vel_pp", "pos_vel_csp"],
     "myactuator": ["param_i8", "param_u8", "param_u16", "param_u32", "param_f32"],
     "hexfellow": ["socketcanfd", "mit", "pos_vel"],
     "hightorque": ["mit", "vel", "param_i8", "param_u8", "param_u16", "param_u32", "param_f32"]
@@ -155,6 +156,13 @@ impl Default for MotorState {
             t_rotor: 0.0,
         }
     }
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct MotorStateMetadata {
+    pub feedback_age_ns: u64,
+    pub feedback_sequence: u64,
 }
 
 fn ffi_rc(result: Result<(), String>) -> i32 {

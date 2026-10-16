@@ -46,6 +46,7 @@
     "state_and_feedback": [
       "motor_handle_request_feedback",
       "motor_handle_get_state",
+      "motor_handle_get_state_snapshot",
       "motor_handle_set_can_timeout_ms",
       "motor_handle_store_parameters"
     ],
@@ -60,7 +61,6 @@
       "motor_handle_damiao_write_param_u32"
     ],
     "robstride": [
-      "motor_handle_robstride_feedback_sequence",
       "motor_handle_robstride_ping",
       "motor_handle_robstride_ping_host_id",
       "motor_handle_robstride_get_param_f32_host_id",
@@ -138,8 +138,8 @@
       "Motor.damiao_get_param_u32(param_id, timeout_ms)",
       "Motor.damiao_write_param_f32(param_id, value)",
       "Motor.damiao_write_param_u32(param_id, value)",
-      "Motor.robstride_feedback_sequence()",
-      "Motor.get_state()"
+      "Motor.get_state()",
+      "Motor.get_state_snapshot()"
     ],
     "python": {
       "module_metadata": [

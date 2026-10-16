@@ -22,6 +22,10 @@ RAII-style C++ wrapper on top of `motor_abi`.
 - `motorbridge::abi_capabilities_json()` returns the loaded ABI capability JSON.
 - Binding parity is tracked in `bindings/api_surface.json`.
 
+`Motor::get_state_snapshot()` returns the cached state together with its age in
+seconds and per-motor sequence number. It returns `std::nullopt` until state
+feedback is available. Only complete state updates advance the sequence.
+
 ## Damiao Set-Zero Rule (dm-serial)
 
 - For Damiao, call `disable()` before `set_zero_position()`.

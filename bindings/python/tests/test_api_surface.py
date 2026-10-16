@@ -15,5 +15,5 @@ def test_api_surface_includes_binding_parity_metadata() -> None:
     assert "motorbridge::abi_version()" in surface["bindings"]["cpp"]["namespace_metadata"]
     assert "Motor.robstride_ping_host_id(host_id, timeout_ms)" in surface["bindings"]["motor_methods"]
     assert "Motor.robstride_get_fault_report()" in surface["bindings"]["motor_methods"]
-    assert "motor_handle_robstride_feedback_sequence" in surface["abi"]["robstride"]
-    assert "Motor.robstride_feedback_sequence()" in surface["bindings"]["motor_methods"]
+    assert "motor_handle_get_state_snapshot" in surface["abi"]["state_and_feedback"]
+    assert "Motor.get_state_snapshot()" in surface["bindings"]["motor_methods"]
