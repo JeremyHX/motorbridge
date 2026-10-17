@@ -8,6 +8,7 @@ use crate::protocol::{
 use motor_core::bus::{CanBus, CanFrame};
 use motor_core::device::MotorDevice;
 use motor_core::error::{MotorError, Result};
+use motor_core::feedback::{FeedbackCache, FeedbackSnapshot};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,14 +24,13 @@ pub struct HightorqueMotor {
     /// 力矩 raw↔Nm 补偿系数(由 `model` 解析,参考固件 `motor_tqe_adj[]`,见 P2-15)。
     torque_coeff: TorqueCoeff,
     bus: Arc<dyn CanBus>,
-    state: Mutex<Option<HightorqueFeedbackState>>,
-    /// 状态缓存序号:每次缓存写入(主动 `wait_status` 或被动
-    /// `process_feedback_frame`)递增。`wait_status` 以调用前的序号为基准,
-    /// 序号前进即视为回复已到达——否则与 CoreController 后台收帧线程
-    /// (PollingMode::Background)在同一总线上抢 `bus.recv`,回帧被后台
-    /// 线程吃掉时主动查询会空转到超时(数据其实已入缓存)。与 `ack_seq`
-    /// 同款"序号推进即成功"的模式。
-    state_seq: AtomicU64,
+    /// 状态缓存(motor_core 跨厂商 FeedbackCache):后台收帧线程
+    /// 经 `process_feedback_frame` 被动写入,自带写入序号与入缓时刻
+    /// (`sequence`/`age`),`wait_status` 以调用前序号为基准判定回复
+    /// 到达——不再与 CoreController 后台收帧线程在同一总线上抢
+    /// `bus.recv`。替代原 `Mutex<Option<…>>` + 手工 `state_seq` 方案
+    /// (序号推进即成功的模式由 FeedbackCache 内建)。
+    state: FeedbackCache<HightorqueFeedbackState>,
     /// 设置 ACK 序号:每收到一帧 ACK 由 `process_feedback_frame` 递增,
     /// `send_with_ack` 轮询该序号判定 ACK 是否到达(参照 robstride crate)。
     ack_seq: AtomicU64,
@@ -65,8 +65,7 @@ impl HightorqueMotor {
             model: model.to_string(),
             torque_coeff,
             bus,
-            state: Mutex::new(None),
-            state_seq: AtomicU64::new(0),
+            state: FeedbackCache::new(),
             ack_seq: AtomicU64::new(0),
             register_cache: Mutex::new(HashMap::new()),
             control_reply_enabled: AtomicBool::new(false),
@@ -87,7 +86,11 @@ impl HightorqueMotor {
     }
 
     pub fn latest_state(&self) -> Option<HightorqueFeedbackState> {
-        self.state.lock().ok().and_then(|g| *g)
+        self.latest_state_snapshot().map(|snapshot| snapshot.state)
+    }
+
+    pub fn latest_state_snapshot(&self) -> Option<FeedbackSnapshot<HightorqueFeedbackState>> {
+        self.state.latest().ok().flatten()
     }
 
     /// 统一 enable 契约在 HT 上的映射:**语义空操作(方案 B,2026-10-08
@@ -501,22 +504,27 @@ impl HightorqueMotor {
     }
 
     fn wait_status(&self, timeout: Duration) -> Result<()> {
-        let start_seq = self.state_seq.load(Ordering::Acquire);
+        let start_seq = self
+            .state
+            .sequence()
+            .map_err(|_| MotorError::Io("state cache lock poisoned".to_string()))?;
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             // 后台收帧线程可能已把回帧解码进缓存:序号前进即成功,
             // 不再依赖本线程自己从 bus 收到该帧。
-            if self.state_seq.load(Ordering::Acquire) > start_seq {
+            if self
+                .state
+                .sequence()
+                .map_err(|_| MotorError::Io("state cache lock poisoned".to_string()))?
+                > start_seq
+            {
                 return Ok(());
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if let Some(frame) = self.bus.recv(left.min(Duration::from_millis(20)))? {
                 if let Some(state) = decode_read_reply(frame, self.torque_coeff) {
                     if state.can_id as u16 == self.motor_id {
-                        if let Ok(mut g) = self.state.lock() {
-                            *g = Some(state);
-                        }
-                        self.state_seq.fetch_add(1, Ordering::Release);
+                        self.state.update(state)?;
                         return Ok(());
                     }
                 }
@@ -594,13 +602,9 @@ impl MotorDevice for HightorqueMotor {
         }
         if let Some(state) = decode_feedback(frame, self.torque_coeff) {
             if state.can_id as u16 == self.motor_id {
-                self.state
-                    .lock()
-                    .map_err(|_| MotorError::Io("state lock poisoned".to_string()))?
-                    .replace(state);
-                // 推进缓存序号,让正在 wait_status 主动等待的一方也能
-                // 观察到"回复已到达"。
-                self.state_seq.fetch_add(1, Ordering::Release);
+                // 写入 FeedbackCache(内部推进序号与入缓时刻,供
+                // wait_status 序号判定与 latest_state_snapshot)。
+                self.state.update(state)?;
             }
         }
         Ok(())
@@ -1245,5 +1249,48 @@ mod tests {
         }
         assert_eq!(&sent[0].data[..5], &[0x05, 0xB4, 0x02, 0x0A, 0x00]);
         assert_eq!(&sent[1].data[..5], &[0x05, 0xB4, 0x02, 0x00, 0x00]);
+    }
+
+    // 自 origin/main 合入:验证 FeedbackCache 语义——只有可解码的
+    // 状态帧才推进快照序号与入缓时刻。帧格式适配 v2.0.0
+    // (回帧 id=motor_id<<8;main 原测试的裸 id 布局是旧协议)。
+    #[test]
+    fn only_decoded_status_advances_the_snapshot() {
+        let bus: Arc<dyn CanBus> = Arc::new(MockBus::new());
+        let motor = HightorqueMotor::new(1, 1, "hightorque", bus);
+
+        motor
+            .process_feedback_frame(CanFrame {
+                arbitration_id: 0x0100,
+                data: [0x27, 0x01, 0, 0, 0, 0, 0, 0],
+                dlc: 8,
+                is_extended: true,
+                is_rx: true,
+            })
+            .expect("status feedback");
+        let first = motor.latest_state_snapshot().expect("first snapshot");
+        assert_eq!(first.sequence, 1);
+
+        // v2.0.0 下 8 字节非 0x27 帧均为合法被动状态帧(原 main 测试的
+        // [0x01,..] 布局已不成立),改用短帧寄存器回复(cmd 0x25 =
+        // reply+Int16+count1,dlc 4):只入寄存器缓存,不推进状态
+        // 快照——同时验证两条缓存的分离。
+        motor
+            .process_feedback_frame(CanFrame {
+                arbitration_id: 0x0100,
+                data: [0x25, 0x01, 0x34, 0x12, 0, 0, 0, 0],
+                dlc: 4,
+                is_extended: true,
+                is_rx: true,
+            })
+            .expect("register reply frame");
+        let after_non_state = motor.latest_state_snapshot().expect("snapshot remains");
+        assert_eq!(after_non_state.sequence, first.sequence);
+        assert_eq!(after_non_state.received_at, first.received_at);
+        // 短帧仍应入寄存器缓存(0x01 = I16 0x1234)。
+        assert!(matches!(
+            motor.cached_register(0x01),
+            Some(crate::protocol::RegisterValue::I16(0x1234))
+        ));
     }
 }

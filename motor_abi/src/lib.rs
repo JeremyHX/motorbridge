@@ -38,6 +38,7 @@ const ABI_CAPABILITIES: &str = r#"{
   "vendors": ["damiao", "robstride", "myactuator", "hexfellow", "hightorque"],
   "features": {
     "state_cache": true,
+    "state_snapshot_metadata": true,
     "controller_lifecycle": ["shutdown", "close_bus", "poll_feedback_once", "enable_all", "disable_all"],
     "control_modes": ["mit", "pos-vel", "vel", "force-pos", "robstride-pos-vel-pp", "robstride-pos-vel-csp"],
     "damiao": ["dm-serial", "dm-device", "register_u32", "register_f32", "param_u32", "param_f32", "set_can_timeout_ms"],
@@ -366,6 +367,13 @@ impl Default for MotorState {
             fault_code: 0,
         }
     }
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct MotorStateMetadata {
+    pub feedback_age_ns: u64,
+    pub feedback_sequence: u64,
 }
 
 fn ffi_rc(result: Result<(), String>) -> i32 {

@@ -20,5 +20,14 @@ class MotorState:
     torq: float
     t_mos: float
     t_rotor: float
-    # HighTorque: 表3 故障码(0=无故障); 其余厂商恒 0。
+    # 错误码(0=无故障;与 status_code 分开,统一契约见 motor_abi state_ffi.rs):
+    # HighTorque=表3 故障码;Damiao=状态枚举 0x08–0x0E 故障段;
+    # Robstride=状态帧六故障位域(bit5..bit0,可并存);其余厂商恒 0。
     fault_code: int = 0
+
+
+@dataclass(frozen=True)
+class MotorStateSnapshot:
+    state: MotorState
+    feedback_age_s: float
+    feedback_sequence: int

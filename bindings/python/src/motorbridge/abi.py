@@ -3,7 +3,20 @@ import ctypes.util
 import json
 import os
 import sys
-from ctypes import POINTER, Structure, c_char_p, c_float, c_int8, c_int16, c_int32, c_uint8, c_uint16, c_uint32, c_void_p
+from ctypes import (
+    POINTER,
+    Structure,
+    c_char_p,
+    c_float,
+    c_int8,
+    c_int16,
+    c_int32,
+    c_uint8,
+    c_uint16,
+    c_uint32,
+    c_uint64,
+    c_void_p,
+)
 from pathlib import Path
 
 from .errors import AbiLoadError
@@ -22,6 +35,13 @@ class CState(Structure):
         ("t_rotor", c_float),
         # HighTorque: 表3 故障码(0=无故障); 其余厂商恒 0。末尾追加, 旧布局不变。
         ("fault_code", c_uint8),
+    ]
+
+
+class CStateMetadata(Structure):
+    _fields_ = [
+        ("feedback_age_ns", c_uint64),
+        ("feedback_sequence", c_uint64),
     ]
 
 
@@ -258,6 +278,12 @@ class Abi:
 
         lib.motor_handle_get_state.argtypes = [c_void_p, POINTER(CState)]
         lib.motor_handle_get_state.restype = c_int32
+        lib.motor_handle_get_state_snapshot.argtypes = [
+            c_void_p,
+            POINTER(CState),
+            POINTER(CStateMetadata),
+        ]
+        lib.motor_handle_get_state_snapshot.restype = c_int32
 
         lib.motor_handle_damiao_get_param_f32.argtypes = [c_void_p, c_uint16, c_uint32, POINTER(c_float)]
         lib.motor_handle_damiao_get_param_f32.restype = c_int32
