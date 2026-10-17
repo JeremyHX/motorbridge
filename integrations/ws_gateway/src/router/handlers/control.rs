@@ -16,6 +16,8 @@ pub(crate) fn handle(op: &str, v: &Value, ctx: &mut SessionCtx) -> Option<Result
     match op {
         "mit" => Some(handle_mit(v, ctx)),
         "pos_vel" | "pos-vel" => Some(handle_pos_vel(v, ctx)),
+        "pos_vel_acc" | "pos-vel-acc" => Some(handle_pos_vel_acc(v, ctx)),
+        "torque" => Some(handle_torque(v, ctx)),
         "vel" => Some(handle_vel(v, ctx)),
         "force_pos" | "force-pos" => Some(handle_force_pos(v, ctx)),
         _ => None,
@@ -218,6 +220,77 @@ fn handle_pos_vel(v: &Value, ctx: &mut SessionCtx) -> Result<Value, String> {
         }
         Some(MotorHandle::Myactuator(_)) => {
             Err("pos_vel is not supported for myactuator".to_string())
+        }
+        None => Err("motor not connected".to_string()),
+    }
+}
+
+fn handle_pos_vel_acc(v: &Value, ctx: &mut SessionCtx) -> Result<Value, String> {
+    ctx.ensure_connected()?;
+    let cmd = ActiveCommand::PosVelAcc {
+        pos: as_f32(v, "pos", 0.0),
+        vlim: as_f32(v, "vlim", 1.0),
+        acc: as_f32(v, "acc", 1.0),
+    };
+    // 梯形控制(07 2d,固件 v4.6.0+)是 HighTorque 协议专属,其它厂商
+    // 协议无加速度字段,直接拒绝而非近似降级。
+    match ctx.motor.as_ref() {
+        Some(MotorHandle::Hightorque(m)) => {
+            if let ActiveCommand::PosVelAcc { pos, vlim, acc } = cmd {
+                m.send_cmd_pos_vel_acc(pos, vlim, acc)
+                    .map_err(|e| e.to_string())?;
+            }
+            ctx.active = if as_bool(v, "continuous", false) {
+                Some(cmd)
+            } else {
+                None
+            };
+            Ok(json!({"op":"pos_vel_acc","continuous": as_bool(v, "continuous", false)}))
+        }
+        Some(MotorHandle::Damiao(_)) => {
+            Err("pos_vel_acc is not supported for damiao".to_string())
+        }
+        Some(MotorHandle::Hexfellow(_)) => {
+            Err("pos_vel_acc is not supported for hexfellow".to_string())
+        }
+        Some(MotorHandle::Myactuator(_)) => {
+            Err("pos_vel_acc is not supported for myactuator".to_string())
+        }
+        Some(MotorHandle::Robstride(_)) => {
+            Err("pos_vel_acc is not supported for robstride".to_string())
+        }
+        None => Err("motor not connected".to_string()),
+    }
+}
+
+fn handle_torque(v: &Value, ctx: &mut SessionCtx) -> Result<Value, String> {
+    ctx.ensure_connected()?;
+    let cmd = ActiveCommand::Torque {
+        tau: as_f32(v, "tau", 0.0),
+    };
+    // 力矩目标直接下发(05 13)是 HighTorque 协议专属;其它厂商的力矩
+    // 语义走 MIT 前馈(`mit` op),这里拒绝而非近似降级。
+    match ctx.motor.as_ref() {
+        Some(MotorHandle::Hightorque(m)) => {
+            if let ActiveCommand::Torque { tau } = cmd {
+                m.send_cmd_torque(tau).map_err(|e| e.to_string())?;
+            }
+            ctx.active = if as_bool(v, "continuous", false) {
+                Some(cmd)
+            } else {
+                None
+            };
+            Ok(json!({"op":"torque","continuous": as_bool(v, "continuous", false)}))
+        }
+        Some(MotorHandle::Damiao(_)) => Err("torque is not supported for damiao".to_string()),
+        Some(MotorHandle::Hexfellow(_)) => {
+            Err("torque is not supported for hexfellow".to_string())
+        }
+        Some(MotorHandle::Myactuator(_)) => {
+            Err("torque is not supported for myactuator".to_string())
+        }
+        Some(MotorHandle::Robstride(_)) => {
+            Err("torque is not supported for robstride".to_string())
         }
         None => Err("motor not connected".to_string()),
     }

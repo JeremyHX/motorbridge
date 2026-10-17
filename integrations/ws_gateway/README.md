@@ -65,7 +65,7 @@ If a vendor does not support one of these four baseline modes, gateway returns `
 | robstride | native MIT | maps to native Position (`run_mode=1` + `vel_max` + `loc_ref`) | native Velocity mode | unsupported | `vel` maps to vendor velocity target; `pos_vel` maps to vendor Position | native param read/write via `robstride_*` |
 | hexfellow | native MIT | native POS_VEL | unsupported | unsupported | `mit` supports `kp/kd/tau`; no standalone `vel` | CAN-FD path |
 | myactuator | unsupported | Position setpoint flow | native velocity setpoint | unsupported | `pos_vel` via position setpoint; `vel` in baseline set | native strengths: current/position/version/mode-query |
-| hightorque | native MIT (v2.0.0 bit-packed frame) | native POS_VEL (`0x07 0x35`) | native velocity frame | unsupported | all commands go through `motor_vendor_hightorque` (single implementation); feedback is physical units with model torque-coeff correction | current subset: scan/read/mit/vel/pos-vel/stop plus set-zero/store/clear-error; `enable` honestly rejected (protocol has no enable frame) |
+| hightorque | native MIT (v2.0.0 bit-packed frame) | native POS_VEL (`0x07 0x35`) | native velocity frame | unsupported | all commands go through `motor_vendor_hightorque` (single implementation); feedback is physical units with model torque-coeff correction | additionally `pos_vel_acc` (trapezoid `07 2d`) and `torque` (`05 13`, physical Nm) modes plus `pos_classic`/`dq_voltage`/`dq_current`/`brake`/`run_mode`/`write_register`/`periodic_report`/`version`/`read_register` vendor ops; `enable` is a semantic no-op (plan B, 2026-10-08: succeeds without sending any frame) |
 
 ### Unified Core Ops Support Matrix
 
@@ -127,9 +127,9 @@ Recommended: client calls `{"op":"capabilities"}` on connect and adapts UI/flows
       },
       "hightorque": {
         "transports": ["auto", "socketcan"],
-        "modes": ["mit", "pos_vel", "vel"],
+        "modes": ["mit", "pos_vel", "pos_vel_acc", "vel", "torque"],
         "ops_unified": ["scan", "disable", "stop", "state_once", "status", "verify"],
-        "ops_vendor_native": ["read", "set_zero_position", "store_parameters"]
+        "ops_vendor_native": ["read", "pos_classic", "version", "read_register", "dq_voltage", "dq_current", "brake", "run_mode", "write_register", "periodic_report", "set_zero_position", "store_parameters"]
       }
     },
     "unsupported_behavior": "return {ok:false,error:'unsupported ...'}"
@@ -346,7 +346,7 @@ RobStride parameter stream frame:
 - Parameter streams: `param_stream` supports Damiao and RobStride; `damiao_param_stream` and `robstride_param_stream` are vendor-specific aliases.
 - RobStride-only ops: `robstride_ping`, `robstride_read_param`, `robstride_write_param`, `set_active_report`.
 - MyActuator-native ops: `current`, `pos`, `version`, `mode-query`.
-- HighTorque-native op: `read`.
+- HighTorque-native ops: `read`, `pos_classic` (classic position `07 07`, `tqe` optional = unlimited), `version` (firmware; MyActuator also supported), `read_register` (`17` family, `addr`/`count`/`ty`), `torque` (`05 13`, physical Nm, continuous-capable), `dq_voltage` / `dq_current` (combined mode+register frames), `brake` (run mode 15), `run_mode` (table-2 mode switch, real frame), `write_register` (`05 <addr> <val16>`), `periodic_report` (`05 B4`, motor-initiated status stream).
 - V2 plan can switch to binary frames while preserving operation semantics.
 
 ## Simple HMI (for quick testing)

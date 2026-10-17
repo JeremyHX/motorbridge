@@ -69,10 +69,14 @@ fn is_mode_word(s: &str) -> bool {
             | "volt"
             | "cur"
             | "pos-vel-tqe"
+            | "pos-vel-acc"
+            | "read-reg"
+            | "write-reg"
             | "brake"
             | "rezero"
             | "conf-write"
             | "timed-read"
+            | "periodic-report"
             | "clear-error"
             | "clear-fault"
             | "quick-stop"
@@ -215,7 +219,7 @@ RobStride CiA402 modes:\n\
 RobStride MIT protocol modes:\n\
   --mode scan | status | enable | disable | clear-error | zero | set-mode | set-can-id | set-host-id | get-protocol | set-protocol | save | active-report | mit | pos-vel | vel | read-param | write-param\n\n\
 HighTorque modes:\n\
-  --mode ping | scan | read | mit | pos | vel | tqe | volt | cur | pos-vel-tqe | stop | brake | rezero | conf-write | timed-read\n\n\
+  --mode ping | scan | read | mit | pos | vel | tqe | volt | cur | set-mode | pos-vel-tqe | pos-vel-acc | version | read-reg | write-reg | stop | brake | rezero | conf-write | periodic-report\n\n\
 MyActuator modes:\n\
   --mode scan | enable | disable | stop | set-zero | status | current | vel | pos | version | mode-query\n\n\
 \n\
@@ -295,6 +299,10 @@ Run-mode effective arguments:\n\
   RobStride MIT pos-vel:    --pos --vlim\n\
   RobStride MIT vel:        --vel --current(or --ilim)\n\
   HighTorque mit:    --pos --vel --kp --kd --tau (v2.0.0 MIT bit-packed frame, firmware v4.6.0+)\n\
+  HighTorque pos-vel-acc: --pos --vlim --acc (trapezoid 07 2d frame, firmware v4.6.0+)\n\
+  HighTorque tqe:    --tau <Nm> (torque mode 05 13, model coeff compensated)\n\
+  HighTorque volt:   --volt <V> (DQ voltage mode, 0.1 V/LSB)\n\
+  HighTorque cur:    --cur <A> (DQ current mode, 0.1 A/LSB)\n\
   Hexfellow mit:     --pos --vel --kp --kd --tau\n\
   Hexfellow pos-vel: --pos --vlim\n\
 \n\
@@ -308,8 +316,14 @@ MyActuator extras:\n\
 HighTorque extras:\n\
   unified args: --pos(rad) --vel(rad/s) --tau(Nm)\n\
   alt args: --pos-deg --vel-deg-s\n\
-  raw args: --raw-pos --raw-vel --raw-tqe (--mode pos/vel/tqe/mit)\n\
+  raw args: --raw-pos --raw-vel (--mode pos/vel/mit; torque is physical --tau Nm only)\n\
   --kp/--kd are packed into the v2.0.0 MIT bit-packed frame (firmware v4.6.0+, saturated beyond range)\n\
+  --vlim <rad/s> --acc <rad/s^2> for --mode pos-vel-acc (trapezoid 07 2d)\n\
+  --timeout-ms <ms> for --mode version/read-reg (default 500)\n\
+  --addr <hex|dec> --count <1-3> [--ty 0|i8 1|i16 2|i32 3|f32] for --mode read-reg\n\
+  --addr <hex|dec> --value <int16> [--config 0|1] [--store 0|1] for --mode write-reg (config=1: extended frame; store=1: append conf-write 05 B3 flash save, default 0)\n\
+  --run-mode <0-17> for --mode set-mode (protocol table 2; 0=stop+clear error, 8=DQ voltage, 9=DQ current, 10=position, 15=brake)\n\
+  --period-ms <ms> for --mode periodic-report (>=1 enable motor-initiated status stream, 0 stop; timed-read is a legacy alias)\n\
   --loop/--dt-ms are supported for repeated send cadence\n\
 \n\
 All-vendor scan:\n\

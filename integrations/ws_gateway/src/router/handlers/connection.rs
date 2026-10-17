@@ -96,10 +96,15 @@ fn handle_capabilities(ctx: &SessionCtx) -> Result<Value, String> {
             },
             "hightorque": {
                 "transports": ["auto", "socketcan"],
-                "modes": ["mit", "pos_vel", "vel"],
+                "modes": ["mit", "pos_vel", "pos_vel_acc", "vel", "torque"],
                 "ops_unified": ["scan", "disable", "stop", "state_once", "status", "verify"],
-                "ops_vendor_native": ["read", "set_zero_position", "store_parameters"]
-            }
+                "ops_vendor_native": [
+                    "read", "pos_classic", "version", "read_register",
+                    "dq_voltage", "dq_current", "brake", "run_mode",
+                    "write_register", "periodic_report",
+                    "set_zero_position", "store_parameters",
+                ],
+            },
         },
         "unsupported_behavior": "return {ok:false,error:'unsupported ...'}"
     }))

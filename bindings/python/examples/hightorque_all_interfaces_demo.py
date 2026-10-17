@@ -19,39 +19,76 @@ print-and-continue。差异点见各步注释。
     # 跳过 set_zero/store(不动电机闪存):
     HT_EXAMPLE_WRITE_CONFIG=0 python hightorque_all_interfaces_demo.py ...(参数同上)
 
-覆盖接口(Python SDK,运动仅测位置模式):
+覆盖接口(Python SDK,运动=位置三帧+力矩,另含底层原语):
 - ``request_feedback`` + ``get_state`` → 设备探测(HT 无 ping,以状态回读代)
 - ``clear_error`` ← 映射到停止帧(表2 模式 0 "停止，清除错误",与 disable 同帧)
 - ``ensure_mode(Mode.POS_VEL)`` ← 统一模式接口(HT 仅校验 mode<=17,
   不写寄存器;运动命令帧自带模式)
-- ``enable`` / ``disable`` ← HT 的 enable=Unsupported,disable=send_stop
+- ``enable`` / ``disable`` ← HT 的 enable=语义空操作(2026-10-08 起不发帧
+  直接成功),disable=send_stop
 - ``set_zero_position`` + ``store_parameters``(改写电机配置,默认开,见下)
+- ``hightorque_request_firmware_version``(15 B5 02 固件版本,只读诊断)
+- ``hightorque_get_register``(17 族通用寄存器读 0x01-0x03,只读诊断)
 - ``send_pos_vel``(位置模式,协同 pos-vel 0x07 0x35,按当前位小幅正弦振荡)
+- ``hightorque_send_pos_vel_acc``(梯形 07 2d,同幅正弦;需固件 v4.6.0+)
+- ``hightorque_send_torque``(力矩模式 05 13,小幅正弦力矩 0→±0.3 Nm)
+- ``hightorque_send_pos_classic``(普通位置 07 07,固件内部 PID,幅值减半保守)
+- ``hightorque_brake``(01 00 0F 阻尼刹车,运动中刹车观察 vel 衰减)
+- ``send_mit``(MIT 位打包 0x18000|id,固件 v4.6.0+,小增益正弦,段 9b)
+- ``hightorque_set_run_mode``(01 00 <mode> 显式模式切换;0=停止清错,18 拒绝)
+- ``hightorque_write_register``(05 寄存器写:0x22 前馈扭矩写 0,读回校验)
+- ``hightorque_set_periodic_report``(05 B4 02 周期上报:2c 按文件头开关开
+  10ms 供全程状态刷新,段 12 自含验证停止后冻结)
 
 与 RS 的关键差异:
 1. HT 协议无 separate 使能帧 / 模式切换帧:控制帧的 cmd 字节即决定模式
    (0x07 0x35=位置、0x07 0x07=速度、0x18000|id=MIT),电机收到即执行,
-   无需先 enable 再切 run_mode。故 ``_switch_mode`` 不调 enable,``ensure_mode``
-   仅做范围校验(协议确无 run_mode 寄存器可写,参考固件 `motor_control.c`
-   全表无 `motor_enable`/`motor_set_mode`)。
-2. 本次按用户要求只测位置模式(``send_pos_vel``);MIT / 速度 / force_pos 不测。
+   无需先 enable 再切 run_mode。``enable`` 为语义空操作(2026-10-08 起
+   方案 B:不发任何帧,直接成功),``_switch_mode`` 保留调用仅为对齐统一
+   enable→command 流程;``ensure_mode`` 仅做范围校验(协议确无 run_mode
+   寄存器可写,参考固件 `motor_control.c` 全表无 `motor_enable`/`motor_set_mode`)。
+2. 运动测试覆盖位置三帧(协同 07 35 / 梯形 07 2d / 普通 07 07)+ 力矩
+   (05 13)+ MIT(0x18000|id 位打包,段 9b)+ 底层原语(brake/run_mode/
+   write_reg/periodic_report);速度 / force_pos 不测。
 
 改写电机配置(归零/保存)默认**开启**:每次运行会在当前位置设定机械零点
 并写闪存。设环境变量 ``HT_EXAMPLE_WRITE_CONFIG=0`` 可跳过(仅测运动、不动配置)。
+
+文件开头另有运行开关(直接改源码常量,段代码不动):``PERIODIC_REPORT_MS``
+控制 [2c] 主动(周期)上报,默认 10ms;置 ``None`` 跳过,运动段读数将冻结
+在 probe 快照。
 """
 from __future__ import annotations
 
 import argparse
 import math
 import os
+import sys
 import threading
 import time
+from pathlib import Path
 from typing import Callable
 
+# 默认加载同仓库正在修改的 motorbridge,而非 pip install 的旧版本:
+# 本脚本在 bindings/python/examples/,把 bindings/python/src 插到
+# sys.path 首位后 import 优先命中本地源码;ABI .so 由 abi.py 按
+# 仓库根 target/release 自动发现(或 MOTORBRIDGE_LIB 显式指定)。
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if _SRC.is_dir():
+    sys.path.insert(0, str(_SRC))
+
+import motorbridge
 from motorbridge import Controller, Mode
 from motorbridge.errors import CallError
 
 HOLD_SECS = 3.0
+
+# ---- 文件内配置开关(编辑此处定制运行,无需改段代码) ----
+# [2c] 周期上报(主动上报):设整数 = 上报周期 ms(推荐 10);设 None =
+#     跳过 [2c]。控制帧只发不收,运动段状态刷新依赖被动上报——关闭后
+#     get_state 将冻结在 probe 快照(2026-10-08 真机确认)。段 12 自含,
+#     不受本开关影响。
+PERIODIC_REPORT_MS: int | None = None
 
 
 def main() -> None:
@@ -78,6 +115,7 @@ def main() -> None:
         parser.error("feedback_id must be in 0..127")
 
     write_config = os.environ.get("HT_EXAMPLE_WRITE_CONFIG", "1") not in {"0", "false", "off", "no"}
+    print(f"motorbridge: {motorbridge.__file__}")
     print(
         "== HighTorque 主要接口全过一遍(Python SDK)== "
         f"transport={args.transport} "
@@ -159,6 +197,30 @@ def _run_all(motor, write_config: bool) -> None:
     except CallError as exc:
         print(f"[2.clear_error] 失败: {exc}(继续)")
 
+    # 2b. 只读诊断(无运动):固件版本(15 B5 02)与通用寄存器读(17 族,
+    #     0x01-0x03 = 位置/速度/转矩 int16,raw 值,物理换算按寄存器表)。
+    try:
+        major, minor, patch = motor.hightorque_request_firmware_version()
+        print(f"[2b.firmware] {major}.{minor}.{patch}")
+    except CallError as exc:
+        print(f"[2b.firmware] 失败: {exc}(继续)")
+    try:
+        vals = motor.hightorque_get_register(0x01, ty=1, count=3)
+        print(f"[2b.read_reg] 0x01-0x03 raw={vals}")
+    except CallError as exc:
+        print(f"[2b.read_reg] 失败: {exc}(继续)")
+
+    # 2c. 周期上报开启(05 B4 02 <t>,扩展帧):可选——由文件开头
+    #     PERIODIC_REPORT_MS 开关控制。控制帧只发不收,若不开上报,
+    #     运动段 get_state 将停留在 probe 快照——2026-10-08 真机确认
+    #     (电机正常运动而读数全程冻结)。开启后电机主动发 27 01 状态帧,
+    #     由后台 poll 线程吃进,运动段读数实时。段 12 自含,不受本开关影响。
+    if PERIODIC_REPORT_MS is not None and PERIODIC_REPORT_MS > 0:
+        motor.hightorque_set_periodic_report(PERIODIC_REPORT_MS)
+        print(f"[2c.periodic_report] {PERIODIC_REPORT_MS}ms 被动上报开启(运动段状态刷新依赖)")
+    else:
+        print("[2c.periodic_report] 跳过(PERIODIC_REPORT_MS=None):运动段读数将冻结在 probe 快照")
+
     # 3. 模式选择:ensure_mode 统一接口(HT 仅校验 mode<=17,不写寄存器)。
     #    HT 协议无 separate 使能帧,故不调 enable()(RS 此处会 enable 闭合力矩)。
     #    本次只测位置模式,故选 Mode.POS_VEL。
@@ -202,15 +264,141 @@ def _run_all(motor, write_config: bool) -> None:
                   lambda t: motor.send_pos_vel(start_pos + amp * math.sin(freq * t), vlim))
         _stop_and_disable(motor)
 
+        # 6. 梯形模式(07 2d,固件 v4.6.0+):同一幅正弦改走
+        #    send_pos_vel_acc(加速度上限 2.0 rad/s²)。旧固件不识别 07 2d,
+        #    电机不响应,无副作用。
+        _switch_mode(motor, Mode.POS_VEL)
+        print("[6.POS_VEL_ACC] 同幅正弦改走梯形帧(需固件 v4.6.0+)")
+        _run_hold(motor, "6.POS_VEL_ACC", HOLD_SECS,
+                  lambda t: motor.hightorque_send_pos_vel_acc(
+                      start_pos + amp * math.sin(freq * t), vlim, 2.0))
+        _stop_and_disable(motor)
+
+        # 7. 力矩模式(05 13):send_torque 物理量 Nm(型号系数补偿),
+        #    无需预先切模式。小幅正弦力矩(峰值 0.3 Nm)零起振,
+        #    电机在外力下小幅摆动或保持,结束时 disable 停机。
+        print("[7.TORQUE] 小幅正弦力矩 0→±0.3 Nm(05 13 帧直发力矩目标)")
+        _run_hold(motor, "7.TORQUE", HOLD_SECS,
+                  lambda t: motor.hightorque_send_torque(0.1 * math.sin(freq * t)))
+        _stop_and_disable(motor)
+
+        # 8. 普通位置模式(07 07):目标位置+力矩上限走固件内部 PID
+        #    (Kp/Ki/Kd = 寄存器 0x2B-0x2D,出厂默认值,宿主不参与)。
+        #    首测幅值减半(0.1 rad)、频率减半(1.0 rad/s)——固件增益未知,
+        #    保守起见;若观察明显过冲/抖动属增益配置问题,链路本身已验证。
+        _switch_mode(motor, Mode.POS_VEL)
+        print("[8.POS_CLASSIC] 普通位置帧 07 07(固件内部 PID,amp 减半保守)")
+        _run_hold(motor, "8.POS_CLASSIC", HOLD_SECS,
+                  lambda t: motor.hightorque_send_pos_classic(
+                      start_pos + 0.1 * math.sin(1.0 * t)))
+        _stop_and_disable(motor)
+
+        # 9. 刹车(01 00 0F = 模式 15 相短接阻尼):先 1s 小幅位置正弦获得
+        #    低速,中途 brake 后主动查询观察 vel 衰减——刹车后不再发控制
+        #    帧故无被动回帧,需 request_feedback 拉状态(读查询不退出刹车态)。
+        #    brake 内部即 set_run_mode(15),等效间接验证模式切换帧。
+        print("[9.BRAKE] 小幅运动中刹车(01 00 0F),观察 vel 衰减")
+        _run_hold(motor, "9.BRAKE-motion", 1.0,
+                  lambda t: motor.send_pos_vel(start_pos + 0.1 * math.sin(4.0 * t), 0.5))
+        motor.hightorque_brake()
+        for i in range(3):
+            try:
+                motor.request_feedback()
+            except CallError:
+                pass
+            time.sleep(0.2)
+            print(f"[9.BRAKE] t+{(i + 1) * 0.2:.1f}s {_fmt_state(motor.get_state())}")
+        motor.disable()  # 刹车态回停止/清错(01 00 00)
+
+        # 9b. MIT 模式(0x18000|id 位打包帧,固件 v4.6.0+):统一 ``send_mit``
+        #     接口,pos/vel/kp/kd/tau 一帧五位打包。旧固件不识别该帧,电机
+        #     不响应,无副作用。幅值同段 8 减半保守(0.1 rad,1.0 rad/s),
+        #     小增益 kp=20/kd=1:输出力矩 = (目标位-当前位)·kp +
+        #     (目标速度-当前速度)·kd + 前馈 0(参考固件按型号做 pid_adjust
+        #     增益补偿,本链路未补偿,增益过大易过冲)。SDK 单位:pos=rad,
+        #     vel=rad/s,tau=前馈 Nm;量程 pos ±3.2768 圈 / vel ±2.0 圈/s /
+        #     tau ±10 Nm / kp ±400 / kd ±100,超限饱和打包。
+        _switch_mode(motor, Mode.MIT)
+        print("[9b.MIT] 位打包 MIT 帧 0x18000|id(需 v4.6.0+;kp=20 kd=1 保守)")
+        _run_hold(motor, "9b.MIT", HOLD_SECS,
+                  lambda t: motor.send_mit(
+                      start_pos + 0.1 * math.sin(1.0 * t), 0.0, 5.0, 1.0, 0.0))
+        _stop_and_disable(motor)
+
+    # ---- 底层原语段(无运动,不依赖 start_pos/反馈) ----
+
+    # 10. 显式模式切换(01 00 <mode>):0=停止清错(与 disable 同帧)、
+    #     5=预选位置模式(只切模式不发目标,电机保持静止)。这是命令帧
+    #     之外唯一的手动模式路径;18 越界在 Python 层 ValueError,不占总线。
+    motor.hightorque_set_run_mode(0)
+    print("[10.SET_RUN_MODE] mode=0 停止/清错 ok")
+    time.sleep(0.1)
+    motor.hightorque_set_run_mode(5)
+    print("[10.SET_RUN_MODE] mode=5 预选位置模式 ok(不发目标,静止)")
+    time.sleep(0.2)
+    print(f"[10.SET_RUN_MODE] state={_fmt_state(motor.get_state())}")
+    try:
+        motor.hightorque_set_run_mode(18)
+    except ValueError as exc:
+        print(f"[10.SET_RUN_MODE] 18 越界正确拒绝: {exc}")
+    motor.disable()
+
+    # 11. 寄存器写(05 <addr> <val16>):0x22 前馈扭矩写 0(可逆、零副作用),
+    #     随即 17 族读回校验往返。控制类寄存器走标准控制通道
+    #     (config_class=False);int16 越界在 Python 层直接拒绝。
+    motor.hightorque_write_register(0x22, 0)
+    time.sleep(0.05)
+    try:
+        vals = motor.hightorque_get_register(0x22, ty=1)
+        print(f"[11.WRITE_REG] 0x22 前馈扭矩 写0 读回 raw={vals}")
+    except CallError as exc:
+        print(f"[11.WRITE_REG] 读回失败: {exc}(继续)")
+    try:
+        motor.hightorque_write_register(0x22, 40000)
+    except ValueError as exc:
+        print(f"[11.WRITE_REG] int16 越界正确拒绝: {exc}")
+
+    # 12. 周期上报(05 B4 02 <t>):本段自含——先自行(重)设 10ms,不依赖
+    #     2c 的配置开关;随后静观 2s 确认状态持续刷新(全程无主动查询,
+    #     全靠被动帧);再 t=0 停止并静观 1s,读数不再变化即上报已停。
+    #     越界(>65535)在 Python 层拒绝。
+    motor.hightorque_set_periodic_report(10)
+    print("[12.PERIODIC_REPORT] 已自行(重)设 10ms,静观 2s(无主动查询)...")
+    t0 = time.monotonic()
+    last_print = t0
+    while time.monotonic() - t0 < 2.0:
+        s = motor.get_state()
+        if s is not None and time.monotonic() - last_print >= 0.5:
+            last_print = time.monotonic()
+            print(f"[12.PERIODIC_REPORT] passive {_fmt_state(s)}")
+        time.sleep(0.01)
+    motor.hightorque_set_periodic_report(0)
+    print("[12.PERIODIC_REPORT] t=0 停止上报,静观 1s 确认读数冻结...")
+    frozen = None
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 1.0:
+        s = motor.get_state()
+        if s is not None:
+            frozen = s
+        time.sleep(0.01)
+    print(f"[12.PERIODIC_REPORT] 停止后 state={_fmt_state(frozen)}(数值不再变=正确)")
+    try:
+        motor.hightorque_set_periodic_report(70000)
+    except ValueError as exc:
+        print(f"[12.PERIODIC_REPORT] 越界正确拒绝: {exc}")
+
 
 def _switch_mode(motor, mode: Mode) -> None:
-    """切换模式前的统一前置:失能(send_stop)→ 短停顿 → ensure_mode(校验)。
+    """切换模式前的统一前置:失能(send_stop)→ 短停顿 → enable(no-op)→ ensure_mode(校验)。
 
-    与 RS 的差异:HT 无 enable,故不调 enable();ensure_mode 仅校验 mode<=17,
-    不写 run_mode 寄存器(HT 运动模式由命令帧 cmd 字节决定)。
+    与 RS 的差异:HT 无 separate 使能帧——enable 为语义空操作(2026-10-08
+    起方案 B:不发任何帧,直接成功),调用仅为对齐统一 enable→command 流程;
+    ensure_mode 仅校验 mode<=17,不写 run_mode 寄存器(HT 运行模式由命令帧
+    cmd 字节决定)。
     """
     motor.disable()
     time.sleep(0.06)
+    motor.enable()  # HT:语义空操作,不发任何帧(清错/停机走 disable)
     motor.ensure_mode(mode, 1000)
     print(f"[switch] -> {mode.name}")
 

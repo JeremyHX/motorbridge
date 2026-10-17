@@ -331,7 +331,7 @@ RobStride：
 | RobStride | `enable_all()` |
 | Hexfellow | `enable_all()` |
 | MyActuator | `enable_all()` |
-| HighTorque | 如实报错（协议无使能帧） |
+| HighTorque | 语义空操作（方案 B，2026-10-08）：协议无使能帧且命令即执行，不发帧直接返回成功，与统一 enable 流程及混总线 `enable_all()` 兼容；清错/停机走 `disable`/`stop` |
 
 请求：
 
@@ -807,6 +807,71 @@ RobStride：
 {"op":"force_pos","continuous":true}
 ```
 
+### 9.5 `pos_vel_acc` / `pos-vel-acc`
+
+作用：梯形位置控制（位置 + 速度上限 + 加速度上限），HighTorque 协议专属
+（`0x07 0x2D`，固件 v4.6.0+）。
+
+适用：
+
+| 厂商 | 支持 | 说明 |
+| --- | --- | --- |
+| HighTorque | 是 | vendor `send_cmd_pos_vel_acc`（07 2d 梯形帧） |
+| Damiao / RobStride / Hexfellow / MyActuator | 否 | 协议无加速度字段，直接拒绝不降级 |
+
+参数：
+
+| 字段 | 类型 | 默认值 | 作用 |
+| --- | --- | --- | --- |
+| `pos` | f32 | `0.0` | 目标位置，rad |
+| `vlim` | f32 | `1.0` | 速度上限，rad/s |
+| `acc` | f32 | `1.0` | 加速度上限，rad/s² |
+| `continuous` | bool | `false` | 是否周期发送 |
+
+请求：
+
+```json
+{"op":"pos_vel_acc","pos":1.0,"vlim":2.0,"acc":4.0,"continuous":true}
+```
+
+返回：
+
+```json
+{"op":"pos_vel_acc","continuous":true}
+```
+
+### 9.6 `torque`
+
+作用：力矩目标直接下发（`05 13`，写寄存器 0x13），HighTorque 协议专属。
+`tau` 为物理量 Nm（0.01 N·m/LSB 基准 + 型号力矩系数补偿，型号由
+`set_target`/启动参数的 `model` 决定）。无需预先切模式。
+
+适用：
+
+| 厂商 | 支持 | 说明 |
+| --- | --- | --- |
+| HighTorque | 是 | vendor `send_cmd_torque` |
+| Damiao / RobStride / Hexfellow / MyActuator | 否 | 力矩语义请走 `mit`（前馈力矩），直接拒绝不降级 |
+
+参数：
+
+| 字段 | 类型 | 默认值 | 作用 |
+| --- | --- | --- | --- |
+| `tau` | f32 | `0.0` | 目标力矩，Nm |
+| `continuous` | bool | `false` | 是否周期发送（continuous tick 复用，同 pos_vel_acc） |
+
+请求：
+
+```json
+{"op":"torque","tau":1.1,"continuous":true}
+```
+
+返回：
+
+```json
+{"op":"torque","continuous":true}
+```
+
 ## 10. 厂商辅助控制 op
 
 ### 10.1 `clear_error`
@@ -1238,7 +1303,8 @@ RobStride 返回：
 
 ### 13.3 `version`
 
-作用：读取 MyActuator 版本日期。
+作用：读取版本。MyActuator 返回版本日期；HighTorque 返回固件版本
+（`0x15 0xB5 0x02`，major.minor.patch）。其它厂商不支持。
 
 参数：
 
@@ -1252,10 +1318,16 @@ RobStride 返回：
 {"op":"version","timeout_ms":500}
 ```
 
-返回：
+返回（MyActuator）：
 
 ```json
 {"version":"..."}
+```
+
+返回（HighTorque）：
+
+```json
+{"vendor":"hightorque","major":4,"minor":6,"patch":0}
 ```
 
 ### 13.4 `mode_query` / `mode-query`
@@ -1296,6 +1368,183 @@ RobStride 返回：
 
 ```json
 {"motor_id":1,"arbitration_id":1,"pos":0.0,"vel":0.0,"torq":0.0,"status_code":0,"fault_code":0}
+```
+
+### 14.2 `pos_classic` / `pos-classic`
+
+作用：HighTorque 普通位置模式（`0x07 0x07`）。一次性命令，不进入
+continuous 活动指令。力矩按型号自适应补偿。
+
+参数：
+
+| 字段 | 类型 | 默认值 | 作用 |
+| --- | --- | --- | --- |
+| `pos` | f32 | `0.0` | 目标位置，rad |
+| `tqe` | f32 | 无 | 力矩上限，Nm；缺省表示无限制（0x8000 哨兵） |
+
+请求：
+
+```json
+{"op":"pos_classic","pos":1.0,"tqe":2.5}
+```
+
+返回：
+
+```json
+{"op":"pos_classic","pos":1.0,"tqe":2.5}
+```
+
+### 14.3 `read_register` / `read-register`
+
+作用：HighTorque 通用寄存器读取（`0x17` 族）。返回原始值；物理量标度
+换算按寄存器功能表由调用方完成。
+
+数据类型 `ty`：报文显式指定优先；否则回落寄存器表中已核实的类型；
+两者皆无则报错（规范表未覆盖所有寄存器类型，盲读会按错误宽度解码）。
+
+参数：
+
+| 字段 | 类型 | 默认值 | 作用 |
+| --- | --- | --- | --- |
+| `addr` | u8 | 必填 | 寄存器地址（0x00-0x45） |
+| `count` | u8 | `1` | 连续读取个数，1-3 |
+| `ty` | u8 | 寄存器表 | `0`=Int8 / `1`=Int16 / `2`=Int32 / `3`=Float |
+| `timeout_ms` | u64 | `500` | 读取超时 |
+
+请求：
+
+```json
+{"op":"read_register","addr":1,"count":3,"ty":1}
+```
+
+返回：
+
+```json
+{
+  "op":"read_register","vendor":"hightorque","addr":1,"count":3,
+  "name":"位置","type":"i16",
+  "registers":[{"addr":1,"value":0},{"addr":2,"value":0},{"addr":3,"value":0}]
+}
+```
+
+### 14.4 `dq_voltage` / `dq-voltage`
+
+作用：DQ 电压模式（`01 00 08 05 1B`）：模式写 + Q 轴电压寄存器写拼一帧，
+HighTorque 协议专属。`volt` 单位 V（0.1 V/LSB）；协议只定义 Q 分量，无 D 入参。
+一次性命令，不进入 continuous（持续控制请循环调用）。
+
+请求：
+
+```json
+{"op":"dq_voltage","volt":1.0}
+```
+
+返回：
+
+```json
+{"op":"dq_voltage","volt":1.0}
+```
+
+### 14.5 `dq_current` / `dq-current`
+
+作用：DQ 电流模式（`01 00 09 05 1C`，拼一帧）：`cur` 单位 A（0.1 A/LSB）。
+一次性命令。
+
+请求：
+
+```json
+{"op":"dq_current","cur":0.5}
+```
+
+返回：
+
+```json
+{"op":"dq_current","cur":0.5}
+```
+
+### 14.6 `brake`
+
+作用：刹车（表2 模式 15，`01 00 0F`）：三相短接阻尼刹车。一次性命令。
+
+请求：
+
+```json
+{"op":"brake"}
+```
+
+返回：
+
+```json
+{"op":"brake","mode":15}
+```
+
+### 14.7 `run_mode` / `run-mode`
+
+作用：运行模式切换（`01 00 <mode>` 写模式寄存器 0x000）。真发帧，与
+`ensure_mode`（仅校验，见 §10.3）不同。
+
+`mode` 取表2 值：0=停止并清错，8=DQ 电压，9=DQ 电流，10=位置，15=刹车；
+合法范围 0-17。
+
+请求：
+
+```json
+{"op":"run_mode","mode":8}
+```
+
+返回：
+
+```json
+{"op":"run_mode","mode":8}
+```
+
+### 14.8 `write_register` / `write-register`
+
+作用：通用寄存器写（`05 <addr> <val16>`），HighTorque 协议专属。
+`value` 为 int16 原始值（物理量标度换算由调用方按寄存器功能表完成）。
+`config_class` 非 0 表示配置类寄存器（走扩展 `0x8000|id` 帧），缺省 0 走
+控制通道（控制目标类）。模式寄存器 0x000 不适用本 op，请用 `run_mode`。
+
+参数：
+
+| 字段 | 类型 | 默认值 | 作用 |
+| --- | --- | --- | --- |
+| `addr` | u8 | 必填 | 寄存器地址（0x00-0x45） |
+| `value` | i16 | 必填 | int16 原始值 |
+| `config_class` | u8 | `0` | 1=配置类（扩展帧），0=控制类（控制通道） |
+
+请求：
+
+```json
+{"op":"write_register","addr":34,"value":500,"config_class":0}
+```
+
+返回：
+
+```json
+{
+  "op":"write_register","vendor":"hightorque","addr":34,"value":500,
+  "config_class":false,"name":"前馈扭矩"
+}
+```
+
+### 14.9 `periodic_report` / `periodic-report`
+
+作用：周期上报配置（`05 B4 02 <t_ms16>`，扩展帧）。`period_ms` >= 1 时
+电机按周期主动发 `27 01` 状态帧（由被动反馈路径入状态缓存，
+`state_stream`/`state_once` 均可读到）；`period_ms`=0 停止上报。
+周期最小 1ms，实际建议不小于控制周期。
+
+请求：
+
+```json
+{"op":"periodic_report","period_ms":10}
+```
+
+返回：
+
+```json
+{"op":"periodic_report","period_ms":10,"enabled":true}
 ```
 
 ## 15. 扫描/校验/改 ID

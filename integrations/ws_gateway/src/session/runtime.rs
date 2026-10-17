@@ -30,6 +30,12 @@ impl SessionCtx {
                 Some(ActiveCommand::PosVel { pos, vlim }) => motor
                     .send_cmd_pos_vel(*pos, *vlim)
                     .map_err(|e| e.to_string()),
+                Some(ActiveCommand::PosVelAcc { .. }) => {
+                    Err("pos_vel_acc is not supported for damiao".to_string())
+                }
+                Some(ActiveCommand::Torque { .. }) => {
+                    Err("torque is not supported for damiao".to_string())
+                }
                 Some(ActiveCommand::Vel { vel }) => {
                     motor.send_cmd_vel(*vel).map_err(|e| e.to_string())
                 }
@@ -67,15 +73,19 @@ impl SessionCtx {
                         Duration::from_millis(300),
                     )
                     .map_err(|e| e.to_string()),
-                Some(ActiveCommand::Vel { .. }) | Some(ActiveCommand::ForcePos { .. }) => {
-                    Err("vel/force_pos are not supported for hexfellow".to_string())
+                Some(ActiveCommand::Vel { .. })
+                | Some(ActiveCommand::ForcePos { .. })
+                | Some(ActiveCommand::PosVelAcc { .. })
+                | Some(ActiveCommand::Torque { .. }) => {
+                    Err("vel/force_pos/pos_vel_acc/torque are not supported for hexfellow".to_string())
                 }
                 None => Ok(()),
             },
             Some(MotorHandle::Hightorque(motor)) => match self.active.as_ref() {
                 // 收敛(2026-09-29):全部经 vendor crate。MIT = `0x18000|id`
                 // 位打包帧;vel = `07 07`;pos_vel = `07 35` 协同(此前被拒,
-                // 现在与 ABI/Python 能力对齐);force_pos 协议无对应命令。
+                // 现在与 ABI/Python 能力对齐);pos_vel_acc = `07 2d` 梯形;
+                // force_pos 协议无对应命令。
                 Some(ActiveCommand::Mit {
                     pos,
                     vel,
@@ -91,6 +101,14 @@ impl SessionCtx {
                 Some(ActiveCommand::PosVel { pos, vlim }) => {
                     motor.send_cmd_pos_vel(*pos, *vlim).map_err(|e| e.to_string())
                 }
+                // 梯形控制(07 2d,固件 v4.6.0+):vendor 原语收敛后接入。
+                Some(ActiveCommand::PosVelAcc { pos, vlim, acc }) => motor
+                    .send_cmd_pos_vel_acc(*pos, *vlim, *acc)
+                    .map_err(|e| e.to_string()),
+                // 力矩模式(05 13):目标力矩 Nm,vendor 原语(型号系数补偿)。
+                Some(ActiveCommand::Torque { tau }) => motor
+                    .send_cmd_torque(*tau)
+                    .map_err(|e| e.to_string()),
                 Some(ActiveCommand::ForcePos { .. }) => {
                     Err("force_pos is not supported for hightorque".to_string())
                 }
@@ -102,6 +120,8 @@ impl SessionCtx {
                     .map_err(|e| e.to_string()),
                 Some(ActiveCommand::Mit { .. })
                 | Some(ActiveCommand::PosVel { .. })
+                | Some(ActiveCommand::PosVelAcc { .. })
+                | Some(ActiveCommand::Torque { .. })
                 | Some(ActiveCommand::ForcePos { .. }) => {
                     Err("active command not supported for myactuator".to_string())
                 }
@@ -130,6 +150,12 @@ impl SessionCtx {
                     motor
                         .write_parameter(0x7016, RobstrideParameterValue::F32(*pos))
                         .map_err(|e| e.to_string())
+                }
+                Some(ActiveCommand::PosVelAcc { .. }) => {
+                    Err("pos_vel_acc is not supported for robstride".to_string())
+                }
+                Some(ActiveCommand::Torque { .. }) => {
+                    Err("torque is not supported for robstride".to_string())
                 }
                 Some(ActiveCommand::ForcePos { .. }) => {
                     Err("force_pos is not supported for robstride".to_string())

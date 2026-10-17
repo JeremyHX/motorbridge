@@ -163,6 +163,20 @@ Note:
 - RobStride feedback/host default should use `0xFD`; scan tries `0xFD,0xFF,0xFE,0x00,0xAA` by default.
 - RobStride `feedback_id` / `host_id` is not the motor `device_id`; scan hits report the motor ID as `probe` / `device_id`.
 
+HighTorque SDK extensions (beyond the unified modes, motor-handle methods):
+
+- `hightorque_send_pos_vel_acc(pos, vlim, acc)` — trapezoid control (`07 2d`, firmware v4.6.0+), rad / rad/s / rad/s².
+- `hightorque_send_pos_classic(pos, tqe=None)` — classic position mode (`07 07`), torque limit in Nm; `None` means unlimited.
+- `hightorque_send_torque(torque_nm)` — torque mode (`05 13`): direct torque target in Nm (model-coeff compensated), no mode pre-switch needed.
+- `hightorque_send_dq_voltage(voltage_v)` / `hightorque_send_dq_current(current_a)` — DQ voltage / current modes (mode write + Q-axis register write combined in one frame), V (0.1 V/LSB) / A (0.1 A/LSB); Q component only per protocol.
+- `hightorque_brake()` — brake (run mode 15): all phases shorted damping brake.
+- `hightorque_set_run_mode(mode)` — run-mode switch (`01 00 <mode>`, register 0x000), mode 0-17 per table 2 (0 = stop & clear error); sends a real frame unlike `ensure_mode`.
+- `hightorque_write_register(addr, value, config_class=False)` — generic register write (`05 <addr> <val16>`); `config_class=True` sends via the extended `0x8000|id` frame.
+- `hightorque_set_periodic_report(period_ms)` — periodic status report (`05 B4 02`): `>=1` enables the motor-initiated `27 01` status stream, `0` stops it.
+- `hightorque_request_firmware_version(timeout_ms=500) -> (major, minor, patch)` — firmware version query (`15 B5 02`).
+- `hightorque_get_register(addr, ty=1, count=1, timeout_ms=500) -> list[float]` — generic register read (`17` family); `ty`: 0=Int8 / 1=Int16 / 2=Int32 / 3=Float, `count` 1-3; returns raw values.
+- `get_state()` now also returns `fault_code` (HighTorque table-3 fault code, 0 = no fault; other vendors always 0).
+
 ## Quick Start
 
 ```python

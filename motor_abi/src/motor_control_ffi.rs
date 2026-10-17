@@ -273,25 +273,6 @@ pub extern "C" fn motor_handle_request_feedback(motor: *mut MotorHandle) -> i32 
     })
 }
 
-/// HighTorque 非阻塞状态查询(矩阵 #13 的流式变体): 只发 `17 01` 读状态
-/// 查询帧, 立即返回不等回帧。回帧由 CoreController 后台轮询线程收到并
-/// decode_read_reply 写入状态缓存, 之后 get_state 读到的即是本帧回复。
-/// 供固定频率采样循环使用(发完即走, 下一拍读缓存), 消除 request_feedback
-/// 内部 wait_status 的 500ms 超时上限与逐台串行阻塞。
-/// 其它厂商返回错误(DM 的 request 本就火后即返; RS/Hexfellow/MyActuator
-/// 无此单次查询帧语义)。
-#[unsafe(no_mangle)]
-pub extern "C" fn motor_handle_hightorque_request_feedback_async(motor: *mut MotorHandle) -> i32 {
-    ffi_wrap_motor!(motor, |motor: &MotorHandleInner| {
-        match motor {
-            MotorHandleInner::Hightorque(m) => m
-                .request_motor_feedback_async()
-                .map_err(|e| e.to_string()),
-            _ => Err("hightorque_request_feedback_async requires a HighTorque motor".to_string()),
-        }
-    })
-}
-
 /// 受控停止：保留电机使能，按当前运行模式选择零化策略。
 ///
 /// 与 `motor_handle_disable`（失能、取消力矩）语义不同。
@@ -328,4 +309,332 @@ pub extern "C" fn motor_handle_stop(motor: *mut MotorHandle) -> i32 {
             MotorHandleInner::Hightorque(m) => m.disable().map_err(|e| e.to_string()),
         }
     })
+}
+
+/// HighTorque 梯形控制(v2.0.0 `07 2d`,固件 v4.6.0+):目标位置 + 速度上限 +
+/// 加速度上限。vendor `send_cmd_pos_vel_acc`,仅 HighTorque 电机支持。
+#[unsafe(no_mangle)]
+pub extern "C" fn motor_handle_hightorque_send_pos_vel_acc(
+    motor: *mut MotorHandle,
+    target_position: f32,
+    velocity_limit: f32,
+    acceleration_limit: f32,
+) -> i32 {
+    ffi_wrap_motor!(motor, |motor: &MotorHandleInner| {
+        match motor {
+            MotorHandleInner::Hightorque(m) => m
+                .send_cmd_pos_vel_acc(target_position, velocity_limit, acceleration_limit)
+                .map_err(|e| e.to_string()),
+            _ => Err("hightorque_send_pos_vel_acc requires a HighTorque motor".to_string()),
+        }
+    })
+}
+
+/// HighTorque 普通位置模式(§1.2.1 `07 07`):目标位置 + 力矩上限(Nm)。
+/// `torque_limit_nm` 传 NaN 表示力矩无限制(vendor `send_cmd_pos_classic`
+/// 的 `None` 语义,线上编码为 `0x8000` 哨兵);力矩按型号自适应补偿。
+/// 仅 HighTorque 电机支持。
+#[unsafe(no_mangle)]
+pub extern "C" fn motor_handle_hightorque_send_pos_classic(
+    motor: *mut MotorHandle,
+    target_position: f32,
+    torque_limit_nm: f32,
+) -> i32 {
+    ffi_wrap_motor!(motor, |motor: &MotorHandleInner| {
+        match motor {
+            MotorHandleInner::Hightorque(m) => m
+                .send_cmd_pos_classic(
+                    target_position,
+                    if torque_limit_nm.is_nan() {
+                        None
+                    } else {
+                        Some(torque_limit_nm)
+                    },
+                )
+                .map_err(|e| e.to_string()),
+            _ => Err("hightorque_send_pos_classic requires a HighTorque motor".to_string()),
+        }
+    })
+}
+
+/// HighTorque 力矩模式(协议命令 5 `05 13`):直接下发目标力矩(Nm,物理量)。
+/// 0.01 N·m/LSB 基准 + 型号力矩系数补偿;不需要预先切模式。仅 HighTorque 支持。
+#[unsafe(no_mangle)]
+pub extern "C" fn motor_handle_hightorque_send_torque(
+    motor: *mut MotorHandle,
+    torque_nm: f32,
+) -> i32 {
+    ffi_wrap_motor!(motor, |motor: &MotorHandleInner| {
+        match motor {
+            MotorHandleInner::Hightorque(m) => m
+                .send_cmd_torque(torque_nm)
+                .map_err(|e| e.to_string()),
+            _ => Err("hightorque_send_torque requires a HighTorque motor".to_string()),
+        }
+    })
+}
+
+/// HighTorque DQ 电压模式(协议命令 6 `01 00 08 05 1B`):模式写 + Q 轴电压
+/// 写拼一帧,voltage_v 单位 V(0.1 V/LSB)。协议只定义 Q 分量。仅 HighTorque 支持。
+#[unsafe(no_mangle)]
+pub extern "C" fn motor_handle_hightorque_send_dq_voltage(
+    motor: *mut MotorHandle,
+    voltage_v: f32,
+) -> i32 {
+    ffi_wrap_motor!(motor, |motor: &MotorHandleInner| {
+        match motor {
+            MotorHandleInner::Hightorque(m) => m
+                .send_cmd_dq_voltage(voltage_v)
+                .map_err(|e| e.to_string()),
+            _ => Err("hightorque_send_dq_voltage requires a HighTorque motor".to_string()),
+        }
+    })
+}
+
+/// HighTorque DQ 电流模式(协议命令 6 `01 00 09 05 1C`):模式写 + Q 轴电流
+/// 写拼一帧,current_a 单位 A(0.1 A/LSB)。仅 HighTorque 支持。
+#[unsafe(no_mangle)]
+pub extern "C" fn motor_handle_hightorque_send_dq_current(
+    motor: *mut MotorHandle,
+    current_a: f32,
+) -> i32 {
+    ffi_wrap_motor!(motor, |motor: &MotorHandleInner| {
+        match motor {
+            MotorHandleInner::Hightorque(m) => m
+                .send_cmd_dq_current(current_a)
+                .map_err(|e| e.to_string()),
+            _ => Err("hightorque_send_dq_current requires a HighTorque motor".to_string()),
+        }
+    })
+}
+
+/// HighTorque 刹车(表2 模式 15 `01 00 0F`):三相短接阻尼刹车。仅 HighTorque 支持。
+#[unsafe(no_mangle)]
+pub extern "C" fn motor_handle_hightorque_brake(motor: *mut MotorHandle) -> i32 {
+    ffi_wrap_motor!(motor, |motor: &MotorHandleInner| {
+        match motor {
+            MotorHandleInner::Hightorque(m) => m.brake().map_err(|e| e.to_string()),
+            _ => Err("hightorque_brake requires a HighTorque motor".to_string()),
+        }
+    })
+}
+
+/// HighTorque 运行模式切换(表2,`01 00 <mode>` 写模式寄存器 0x000)。
+/// mode 取 0-17(0=停止并清错,8=DQ 电压,9=DQ 电流,10=位置,15=刹车),
+/// 超范围返回 InvalidArgument。与 `motor_handle_ensure_mode`(仅校验)不同,
+/// 此函数真发帧。仅 HighTorque 支持。
+#[unsafe(no_mangle)]
+pub extern "C" fn motor_handle_hightorque_set_run_mode(motor: *mut MotorHandle, mode: u8) -> i32 {
+    ffi_wrap_motor!(motor, |motor: &MotorHandleInner| {
+        match motor {
+            MotorHandleInner::Hightorque(m) => m.send_run_mode(mode).map_err(|e| e.to_string()),
+            _ => Err("hightorque_set_run_mode requires a HighTorque motor".to_string()),
+        }
+    })
+}
+
+/// HighTorque 通用寄存器写(协议命令 9 派生 `05 <addr> <val16>`)。
+/// `addr` 寄存器地址;`value` int16 值;`config_class` 非 0 表示配置类
+/// 寄存器(走扩展 0x8000|id 帧),0 表示控制目标类(走控制通道)。
+/// 模式寄存器 0x000 不适用本函数,请用 set_run_mode。仅 HighTorque 支持。
+#[unsafe(no_mangle)]
+pub extern "C" fn motor_handle_hightorque_write_register(
+    motor: *mut MotorHandle,
+    addr: u8,
+    value: i16,
+    config_class: u8,
+) -> i32 {
+    ffi_wrap_motor!(motor, |motor: &MotorHandleInner| {
+        match motor {
+            MotorHandleInner::Hightorque(m) => m
+                .write_register(addr, value, config_class != 0)
+                .map_err(|e| e.to_string()),
+            _ => Err("hightorque_write_register requires a HighTorque motor".to_string()),
+        }
+    })
+}
+
+/// HighTorque 周期上报配置(协议命令 10 `05 B4 02 <t_ms16>`,扩展帧)。
+/// `period_ms` 为上报周期(毫秒,最小 1);传 0 停止周期上报。
+/// 开启后电机按周期主动发 `27 01` 状态帧,由被动反馈路径入状态缓存。
+#[unsafe(no_mangle)]
+pub extern "C" fn motor_handle_hightorque_set_periodic_report(
+    motor: *mut MotorHandle,
+    period_ms: u16,
+) -> i32 {
+    ffi_wrap_motor!(motor, |motor: &MotorHandleInner| {
+        match motor {
+            MotorHandleInner::Hightorque(m) => m
+                .set_periodic_report(period_ms)
+                .map_err(|e| e.to_string()),
+            _ => Err("hightorque_set_periodic_report requires a HighTorque motor".to_string()),
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use motor_core::bus::{CanBus, CanFrame};
+    use motor_core::test_support::MockBus;
+    use motor_vendor_hightorque::HightorqueController;
+
+    fn ht_handle() -> (Arc<MockBus>, MotorHandle) {
+        let bus = Arc::new(MockBus::new());
+        let ctrl = HightorqueController::new(Arc::clone(&bus) as Arc<dyn CanBus>);
+        let motor = ctrl.add_motor(1, 0x101, "ht").expect("add motor");
+        (
+            bus,
+            MotorHandle {
+                inner: Mutex::new(MotorHandleInner::Hightorque(motor)),
+            },
+        )
+    }
+
+    fn sent_frame(bus: &MockBus) -> CanFrame {
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 1);
+        sent[0]
+    }
+
+    /// F1:梯形控制走 `07 2d` 帧(control_reply 默认关 → 标准 11 位裸 id,
+    /// 对齐参考固件;2026-10-09 真机证伪扩展写法后退回)。
+    #[test]
+    fn hightorque_send_pos_vel_acc_sends_07_2d_frame() {
+        let (bus, mut handle) = ht_handle();
+        let rc = motor_handle_hightorque_send_pos_vel_acc(
+            (&mut handle) as *mut MotorHandle,
+            1.0,
+            2.0,
+            3.0,
+        );
+        assert_eq!(rc, 0);
+        let f = sent_frame(&bus);
+        assert_eq!(f.arbitration_id, 1);
+        assert!(!f.is_extended);
+        assert_eq!(f.dlc, 8);
+        assert_eq!(&f.data[..2], &[0x07, 0x2d]);
+    }
+
+    /// F2:pos_classic 的 NaN 力矩上限映射为无限制哨兵 `0x8000`(i16::MIN)。
+    #[test]
+    fn hightorque_send_pos_classic_nan_means_unlimited_torque() {
+        let (bus, mut handle) = ht_handle();
+        let rc = motor_handle_hightorque_send_pos_classic(
+            (&mut handle) as *mut MotorHandle,
+            1.0,
+            f32::NAN,
+        );
+        assert_eq!(rc, 0);
+        let f = sent_frame(&bus);
+        assert_eq!(&f.data[..2], &[0x07, 0x07]);
+        // bytes 6-7 = 0x8000 无限制;bytes 4-5 固定 0
+        assert_eq!(&f.data[4..8], &[0x00, 0x00, 0x00, 0x80]);
+    }
+
+    /// F2:有限力矩上限走型号系数补偿(ht 占位 → General k=0.5,
+    /// raw = ((tau - d)/k)*100),不落 0x8000 哨兵。
+    #[test]
+    fn hightorque_send_pos_classic_finite_torque_uses_coeff() {
+        let (bus, mut handle) = ht_handle();
+        let rc = motor_handle_hightorque_send_pos_classic(
+            (&mut handle) as *mut MotorHandle,
+            1.0,
+            1.0,
+        );
+        assert_eq!(rc, 0);
+        let f = sent_frame(&bus);
+        let tqe_raw = i16::from_le_bytes([f.data[6], f.data[7]]);
+        assert_ne!(tqe_raw, i16::MIN);
+    }
+
+    /// A7:力矩模式 `05 13`,1.1 Nm × General(k=0.5) → raw 220。
+    #[test]
+    fn hightorque_send_torque_sends_05_13_frame() {
+        let (bus, mut handle) = ht_handle();
+        let rc = motor_handle_hightorque_send_torque((&mut handle) as *mut MotorHandle, 1.1);
+        assert_eq!(rc, 0);
+        let f = sent_frame(&bus);
+        assert_eq!(f.dlc, 4);
+        assert_eq!(&f.data[..4], &[0x05, 0x13, 0xDC, 0x00]);
+    }
+
+    /// A8/A9:DQ 电压/电流拼一帧(模式写+寄存器写)。
+    #[test]
+    fn hightorque_send_dq_voltage_sends_combined_frame() {
+        let (bus, mut handle) = ht_handle();
+        let rc = motor_handle_hightorque_send_dq_voltage((&mut handle) as *mut MotorHandle, 1.0);
+        assert_eq!(rc, 0);
+        let f = sent_frame(&bus);
+        assert_eq!(f.dlc, 7);
+        assert_eq!(&f.data[..7], &[0x01, 0x00, 0x08, 0x05, 0x1B, 0x0A, 0x00]);
+    }
+
+    #[test]
+    fn hightorque_send_dq_current_sends_combined_frame() {
+        let (bus, mut handle) = ht_handle();
+        let rc = motor_handle_hightorque_send_dq_current((&mut handle) as *mut MotorHandle, 0.5);
+        assert_eq!(rc, 0);
+        let f = sent_frame(&bus);
+        assert_eq!(f.dlc, 7);
+        assert_eq!(&f.data[..7], &[0x01, 0x00, 0x09, 0x05, 0x1C, 0x05, 0x00]);
+    }
+
+    /// A10:刹车 = 模式 15。
+    #[test]
+    fn hightorque_brake_sends_mode_15_frame() {
+        let (bus, mut handle) = ht_handle();
+        let rc = motor_handle_hightorque_brake((&mut handle) as *mut MotorHandle);
+        assert_eq!(rc, 0);
+        let f = sent_frame(&bus);
+        assert_eq!(&f.data[..3], &[0x01, 0x00, 0x0F]);
+    }
+
+    /// A11:set_run_mode 真发帧;超范围(>17)拒绝且不发帧。
+    #[test]
+    fn hightorque_set_run_mode_sends_frame_and_validates() {
+        let (bus, mut handle) = ht_handle();
+        let rc = motor_handle_hightorque_set_run_mode((&mut handle) as *mut MotorHandle, 8);
+        assert_eq!(rc, 0);
+        let f = sent_frame(&bus);
+        assert_eq!(&f.data[..3], &[0x01, 0x00, 0x08]);
+
+        let rc_bad =
+            motor_handle_hightorque_set_run_mode((&mut handle) as *mut MotorHandle, 18);
+        assert_ne!(rc_bad, 0, "mode 18 应被拒绝");
+        // 拒绝时不追加发帧
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 1);
+    }
+
+    /// A14:write_register 两种帧类(config_class=1 恒扩展帧)。
+    #[test]
+    fn hightorque_write_register_frame_classes() {
+        let (bus, mut handle) = ht_handle();
+        let rc = motor_handle_hightorque_write_register(
+            (&mut handle) as *mut MotorHandle,
+            0x22,
+            500,
+            0,
+        );
+        assert_eq!(rc, 0);
+        let f = sent_frame(&bus);
+        assert_eq!(&f.data[..4], &[0x05, 0x22, 0xF4, 0x01]);
+    }
+
+    /// A15:周期上报 `05 B4 02 <t_ms16>` 扩展帧。
+    #[test]
+    fn hightorque_set_periodic_report_sends_b4_frame() {
+        let (bus, mut handle) = ht_handle();
+        let rc = motor_handle_hightorque_set_periodic_report(
+            (&mut handle) as *mut MotorHandle,
+            10,
+        );
+        assert_eq!(rc, 0);
+        let f = sent_frame(&bus);
+        assert_eq!(f.dlc, 5);
+        assert!(f.is_extended);
+        assert_eq!(f.arbitration_id, 0x8001);
+        assert_eq!(&f.data[..5], &[0x05, 0xB4, 0x02, 0x0A, 0x00]);
+    }
 }

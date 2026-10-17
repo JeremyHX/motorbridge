@@ -6,7 +6,9 @@ use motor_vendor_hexfellow::{
     HexfellowController, HexfellowMotor, MitTarget as HexfellowMitTarget,
     PosVelTarget as HexfellowPosVelTarget,
 };
-use motor_vendor_hightorque::{HightorqueController, HightorqueMotor};
+use motor_vendor_hightorque::{
+    HightorqueController, HightorqueMotor, ReadCmd, RegisterType,
+};
 use motor_vendor_myactuator::{
     ControlMode as MyActuatorControlMode, MyActuatorController, MyActuatorMotor,
 };
@@ -42,7 +44,7 @@ const ABI_CAPABILITIES: &str = r#"{
     "robstride": ["ping", "ping_host_id", "fault_report", "active_report", "device_id", "param_i8", "param_u8", "param_u16", "param_u32", "param_f32", "param_f32_host_id", "pos_vel_pp", "pos_vel_csp"],
     "myactuator": ["param_i8", "param_u8", "param_u16", "param_u32", "param_f32"],
     "hexfellow": ["socketcanfd", "mit", "pos_vel"],
-    "hightorque": ["mit", "vel", "param_i8", "param_u8", "param_u16", "param_u32", "param_f32"]
+    "hightorque": ["mit", "vel", "pos_vel", "pos_vel_acc", "pos_classic", "torque", "dq_voltage", "dq_current", "brake", "set_run_mode", "write_register", "periodic_report", "request_register", "firmware_version", "get_register", "fault_code"]
   }
 }"#;
 
@@ -344,6 +346,9 @@ pub struct MotorState {
     pub torq: f32,
     pub t_mos: f32,
     pub t_rotor: f32,
+    /// 故障码:HighTorque 为表3 原始故障码(0=无故障),其余厂商当前恒 0
+    /// (各自故障语义不同,见 capabilities)。末尾追加字段,不改变既有布局。
+    pub fault_code: u8,
 }
 
 impl Default for MotorState {
@@ -358,6 +363,7 @@ impl Default for MotorState {
             torq: 0.0,
             t_mos: 0.0,
             t_rotor: 0.0,
+            fault_code: 0,
         }
     }
 }

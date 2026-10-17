@@ -1,15 +1,20 @@
 use crate::protocol::{
-    decode_feedback, decode_read_reply, decode_register_reply, decode_version_reply,
+    amps_to_raw, decode_feedback, decode_read_reply, decode_register_reply, decode_version_reply,
     encode_mit_frame, encode_read, is_setting_ack, rad_to_pos_raw, radps2_to_acc_raw,
-    radps_to_vel_raw, reply_motor_id, tqe_adjust_to_raw, FirmwareVersion, HightorqueFeedbackState,
-    MotorModel, ReadCmd, RegisterValue, TorqueCoeff, MIT_ID_PREFIX,
+    radps_to_vel_raw, reply_motor_id, tqe_adjust_to_raw, volts_to_raw, FirmwareVersion,
+    HightorqueFeedbackState, MotorModel, ReadCmd, RegisterValue, RunMode, TorqueCoeff,
+    MIT_ID_PREFIX,
 };
 use motor_core::bus::{CanBus, CanFrame};
 use motor_core::device::MotorDevice;
 use motor_core::error::{MotorError, Result};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// `read_registers` 阻塞等待的缓存轮询间隔(对齐 DM 的 2ms)。
+const REGISTER_POLL_INTERVAL_MS: u64 = 2;
 
 pub struct HightorqueMotor {
     pub motor_id: u16,
@@ -29,13 +34,23 @@ pub struct HightorqueMotor {
     /// 设置 ACK 序号:每收到一帧 ACK 由 `process_feedback_frame` 递增,
     /// `send_with_ack` 轮询该序号判定 ACK 是否到达(参照 robstride crate)。
     ack_seq: AtomicU64,
-    /// 控制帧回复开关(2026-09-29 起默认开):控制类命令(pos_vel/vel/stop 等)
+    /// 寄存器缓存(被动路径喂):addr → (最近值, 回复入缓时刻)。
+    /// 回帧由 CoreController 后台收帧线程经 `process_feedback_frame` →
+    /// `decode_register_reply` 解码后按地址入缓;主动读取
+    /// `read_registers` 以 `ts >= request_at` 时间戳新鲜度校验认领
+    /// "本次请求之后的回复", 不再从总线上 `bus.recv` 收帧——与 DM 的
+    /// register_cache / RS 的 param_state 同构。
+    register_cache: Mutex<HashMap<u8, (RegisterValue, Instant)>>,
+    /// 控制帧帧型开关(2026-10-09 起默认关):控制类命令(pos_vel/vel/stop 等)
     /// 是否以扩展 29 位帧 `0x8000|motor_id` 发送并置 bit15 回复总开关。
-    /// 开:协议 §3.2「v2.0.0 固件下,电机收到控制类命令会回发 8 字节状态反馈
-    /// 帧」——每个控制帧都带回帧,由被动反馈路径(process_feedback_frame)入
-    /// 状态缓存,控制流期间 get_state 持续新鲜;对齐协议 PDF §1.4 示例的
-    /// `0x8000|id` 扩展帧写法。关:退回 v2.0.0 参考固件主机原行为(标准
-    /// 11 位裸 id,帧型上无 bit15,控制流静默)——老固件不认扩展控制帧时用。
+    /// 默认(关):**标准 11 位裸 id 帧**——v2.0.0 参考固件主机原行为
+    /// (`can_send(hfdcanx, id, ...)`,协议 §1.3 控制类行)。
+    /// 开:PDF §1.4 示例的 `0x8000|id` 扩展写法。2026-09-29 曾默认开,
+    /// 动机是"每个控制帧带回 §3.2 状态反馈帧";2026-10-09 candump 真机
+    /// 证伪:bit15 置于非查询指令(如 05 13),电机只回一帧 DLC=0 空帧
+    /// (协议 PDF §1.2 原文即如此),**没有**状态数据——开的唯一效果是
+    /// 每个控制帧换一个无用空帧的总线开销,故退回标准帧。开关保留仅作
+    /// 诊断/复现实验用(未接到 ABI/Python)。
     control_reply_enabled: AtomicBool,
 }
 
@@ -53,7 +68,8 @@ impl HightorqueMotor {
             state: Mutex::new(None),
             state_seq: AtomicU64::new(0),
             ack_seq: AtomicU64::new(0),
-            control_reply_enabled: AtomicBool::new(true),
+            register_cache: Mutex::new(HashMap::new()),
+            control_reply_enabled: AtomicBool::new(false),
         }
     }
 
@@ -62,9 +78,10 @@ impl HightorqueMotor {
         self.torque_coeff
     }
 
-    /// 切换控制帧帧型/回复开关(见 `control_reply_enabled` 字段注释)。
-    /// 默认开(扩展 29 位 `0x8000|id` + bit15 请求回复);与不认扩展控制帧的
-    /// 老固件不兼容时置 false,退回参考固件的标准 11 位裸 id 帧。
+    /// 切换控制帧帧型(见 `control_reply_enabled` 字段注释)。
+    /// 默认关:标准 11 位裸 id(参考固件主机原行为)。置 true 切到扩展
+    /// `0x8000|id` + bit15——注意电机对非查询指令只回一帧 DLC=0 空帧
+    /// (2026-10-09 真机证实),无状态数据,仅诊断/复现实验用。
     pub fn set_control_reply(&self, enabled: bool) {
         self.control_reply_enabled.store(enabled, Ordering::Release);
     }
@@ -73,10 +90,18 @@ impl HightorqueMotor {
         self.state.lock().ok().and_then(|g| *g)
     }
 
+    /// 统一 enable 契约在 HT 上的映射:**语义空操作(方案 B,2026-10-08
+    /// 用户决策),不发任何帧**。HT 协议无 separate 使能帧,控制命令的
+    /// cmd 字节即决定行为、电机收到即执行,enable 契约的 postcondition
+    /// ("后续控制命令会被执行")恒成立,故直接 Ok。
+    ///
+    /// 动机:core `apply_bulk_device_op` 遇错中止——enable 返回 Err 会
+    /// 毒化混总线 `enable_all()`(HT 之后的电机永远使能不到);统一
+    /// enable→command→disable 流程也要求 enable 可调用。清错/停机仍由
+    /// `clear_error()`/`disable()` 的 `01 00 00` 显式完成,不借 enable
+    /// 顺带发送,保持本方法零副作用。
     pub fn enable(&self) -> Result<()> {
-        Err(MotorError::Unsupported(
-            "enable is not supported for HighTorque protocol".to_string(),
-        ))
+        Ok(())
     }
 
     pub fn disable(&self) -> Result<()> {
@@ -207,6 +232,79 @@ impl HightorqueMotor {
         ))
     }
 
+    /// 力矩模式(协议 §1 通信命令 5):`0x05 0x13 <tqe16>`,4 字节。
+    /// 物理量入参,raw = `tqe_adjust_to_raw(nm, coeff)`(0.01 N·m/LSB 基准 +
+    /// 型号力矩系数补偿,与 pos_classic 的力矩限幅同一套换算)。
+    /// 不需要预先切模式——该命令自身即为力矩目标下发。
+    pub fn send_cmd_torque(&self, torque_nm: f32) -> Result<()> {
+        let tqe_raw = tqe_adjust_to_raw(torque_nm, self.torque_coeff);
+        let mut data = [0x05, 0x13, 0, 0];
+        data[2..4].copy_from_slice(&tqe_raw.to_le_bytes());
+        self.send_control(&data, 4)
+    }
+
+    /// 运行模式切换(协议 §1 通信命令 6 / 表2):写模式寄存器 0x000,
+    /// `0x01 0x00 <mode>`,3 字节。mode 取 0-17(0=停止并清错,8=DQ 电压,
+    /// 9=DQ 电流,10=位置,15=刹车)。区别于 `ensure_control_mode`(仅校验,
+    /// MotorDevice trait 语义保持不变),此方法真发帧。
+    pub fn send_run_mode(&self, mode: u8) -> Result<()> {
+        if mode > 17 {
+            return Err(MotorError::InvalidArgument(format!(
+                "HighTorque run mode must be 0-17 (表2), got {mode}"
+            )));
+        }
+        self.send_control(&[0x01, 0x00, mode], 3)
+    }
+
+    /// 刹车(表2 模式 15):`0x01 0x00 0x0F`,三相短接阻尼刹车。
+    pub fn brake(&self) -> Result<()> {
+        self.send_run_mode(RunMode::Brake as u8)
+    }
+
+    /// DQ 电压模式(协议 §1 通信命令 6):模式写 + 寄存器写拼一帧,
+    /// `0x01 0x00 0x08 0x05 0x1B <volt16>`,7 字节,0.1 V/LSB。
+    /// 协议只定义 Q 分量(0x1B),无 D 寄存器。
+    pub fn send_cmd_dq_voltage(&self, voltage_v: f32) -> Result<()> {
+        let volt_raw = volts_to_raw(voltage_v);
+        let mut data = [0x01, 0x00, 0x08, 0x05, 0x1B, 0, 0];
+        data[5..7].copy_from_slice(&volt_raw.to_le_bytes());
+        self.send_control(&data, 7)
+    }
+
+    /// DQ 电流模式(协议 §1 通信命令 6):模式写 + 寄存器写拼一帧,
+    /// `0x01 0x00 0x09 0x05 0x1C <cur16>`,7 字节,0.1 A/LSB。
+    pub fn send_cmd_dq_current(&self, current_a: f32) -> Result<()> {
+        let cur_raw = amps_to_raw(current_a);
+        let mut data = [0x01, 0x00, 0x09, 0x05, 0x1C, 0, 0];
+        data[5..7].copy_from_slice(&cur_raw.to_le_bytes());
+        self.send_control(&data, 7)
+    }
+
+    /// 通用寄存器写(协议 §1 通信命令 9 派生):`0x05 <addr> <val16>`,4 字节。
+    /// 帧型按寄存器用途二选一:控制目标类(0x13/0x1B/0x1C 等热路径寄存器)
+    /// 走控制通道;配置类(存储、上报配置等)走扩展 `0x8000|id` 查询通道
+    /// (参考固件 `can_send(hfdcanx, 0x8000 | id, ...)`)。
+    /// 模式寄存器 0x000 不走此族,用 `send_run_mode` 的专用帧。
+    pub fn write_register(&self, addr: u8, value: i16, config_class: bool) -> Result<()> {
+        let mut data = [0x05, 0, 0, 0];
+        data[1] = addr;
+        data[2..4].copy_from_slice(&value.to_le_bytes());
+        if config_class {
+            self.send_query(&data, 4)
+        } else {
+            self.send_control(&data, 4)
+        }
+    }
+
+    /// 周期上报配置(协议 §1 通信命令 10):`0x05 0xB4 0x02 <t_ms16>`,
+    /// 5 字节,扩展 `0x8000|id` 帧。period_ms 最小 1;传 0 停止上报,
+    /// 之后电机不再主动发 `0x27 0x01` 状态帧。
+    pub fn set_periodic_report(&self, period_ms: u16) -> Result<()> {
+        let mut data = [0x05, 0xB4, 0x02, 0, 0];
+        data[3..5].copy_from_slice(&period_ms.to_le_bytes());
+        self.send_query(&data, 5)
+    }
+
     pub fn store_parameters(&self) -> Result<()> {
         // 落盘到 flash(`0x05 0xB3 0x02 0x00 0x00`,参考固件 `conf_write`)。
         // fire-and-forget:参考固件本就如此,0x41 ACK 时序不可靠(见
@@ -260,47 +358,93 @@ impl HightorqueMotor {
         self.wait_status(timeout)
     }
 
-    /// `request_motor_feedback` 的非阻塞版:只发 `17 01` 查询帧,立即返回,
-    /// 不等回帧。回帧由 CoreController 后台轮询线程(motor_core/controller.rs
-    /// PollingMode::Background)收到并经 process_feedback_frame →
-    /// decode_read_reply 写入状态缓存,之后 `latest_state`/get_state 读到的
-    /// 即为本帧的回复。用于固定频率采样场景:循环里发完即走,下一拍读缓存,
-    /// 消除 500ms wait_status 超时上限与逐台串行阻塞。
-    pub fn request_motor_feedback_async(&self) -> Result<()> {
-        self.send_query(&[0x17, 0x01, 0, 0, 0, 0, 0, 0], 8)
+    // 非阻塞状态查询的"发完即走"角色由 `request_registers` 承担:
+    // 命令 8(读状态)是命令 7(通用寄存器读)的特例——
+    // `request_registers(&[ReadCmd { addr: 0x01, ty: Int16, count: 3 }])`
+    // 即同一 `17 01` 查询(协议文档帧型: 数据 `17 01`, dlc 2), 回复
+    // `0x27 0x01` 经被动路径同时写入状态缓存与寄存器缓存。
+
+    /// 通用寄存器读取(协议 §1.3)——DM 风格的"请求即发送":只把一组
+    /// `(cmd, addr)` 读请求帧发到总线上,立即返回不等回帧。
+    ///
+    /// 回复由被动路径(CoreController 后台收帧线程
+    /// `process_feedback_frame` → `decode_register_reply`)按地址写入
+    /// `register_cache`(带入缓时刻)。之后:
+    /// - 阻塞等值:`read_registers`(发送 + 轮询新鲜缓存);
+    /// - 非阻塞轮询:`cached_register`(读最近值)。
+    pub fn request_registers(&self, cmds: &[ReadCmd]) -> Result<()> {
+        let payload = encode_read(cmds).ok_or_else(|| {
+            MotorError::InvalidArgument(
+                "request_registers: cmd list too long or count out of range".to_string(),
+            )
+        })?;
+        self.send_query(&payload, payload.len() as u8)
     }
 
-    /// 通用寄存器读取(协议 §1.3):发送一组 `(cmd, addr)` 读请求并等待回复。
+    /// 读寄存器缓存的最近值(不发帧不等待)。返回 `None` 表示从未收到过
+    /// 该地址的回复。注意:无法区分"新鲜"与"陈旧"(电机掉线后停留在
+    /// 最后一值);需要新鲜度保证时用 `read_registers` 或先
+    /// `request_registers` 发查询、隔一拍回读并自行判断。
+    pub fn cached_register(&self, addr: u8) -> Option<RegisterValue> {
+        self.register_cache
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&addr).map(|(v, _)| *v))
+    }
+
+    /// 通用寄存器读取(协议 §1.3)的阻塞组合:`request_registers` 发帧 +
+    /// 轮询 `register_cache`,以 `ts >= request_at` 时间戳新鲜度校验认领
+    /// "本次请求之后到达的回复"。
     ///
-    /// 返回 `(addr, value)` 列表,地址按每对 count 连续递增。回复帧经
-    /// `reply_motor_id` 校验电机 id 后,由 `decode_register_reply` 解析。
+    /// 与旧实现(直接 `bus.recv` 收帧)相比:不再与 CoreController 后台
+    /// 收帧线程在同一总线队列上抢帧;时间戳即事务号,并发其它寄存器类
+    /// 查询(如 `17 01` 状态查询)的回复按地址入各自的缓存键,不会误认。
     pub fn read_registers(
         &self,
         cmds: &[ReadCmd],
         timeout: Duration,
     ) -> Result<Vec<(u8, RegisterValue)>> {
-        let payload = encode_read(cmds).ok_or_else(|| {
-            MotorError::InvalidArgument(
-                "read_registers: cmd list too long or count out of range".to_string(),
-            )
-        })?;
-        self.send_query(&payload, payload.len() as u8)?;
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if let Some(frame) = self.bus.recv(left.min(Duration::from_millis(20)))? {
-                if reply_motor_id(&frame) != Some(self.motor_id as u8) {
-                    continue;
-                }
-                if let Some(vals) = decode_register_reply(&frame.data[..frame.dlc as usize]) {
-                    return Ok(vals);
+        let request_at = Instant::now();
+        self.request_registers(cmds)?;
+        let deadline = request_at + timeout;
+        loop {
+            if let Some(vals) = self.fresh_registers(cmds, request_at) {
+                return Ok(vals);
+            }
+            if Instant::now() >= deadline {
+                let addrs = cmds
+                    .iter()
+                    .map(|c| format!("0x{:02X}", c.addr))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                return Err(MotorError::Timeout(format!(
+                    "HighTorque register read timeout on motor id {} (addr {})",
+                    self.motor_id, addrs
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(REGISTER_POLL_INTERVAL_MS));
+        }
+    }
+
+    /// 从缓存取出覆盖全部请求地址且入缓时刻 >= `request_at` 的值;
+    /// 任一地址缺失或陈旧则返回 `None`(继续等)。
+    fn fresh_registers(
+        &self,
+        cmds: &[ReadCmd],
+        request_at: Instant,
+    ) -> Option<Vec<(u8, RegisterValue)>> {
+        let cache = self.register_cache.lock().ok()?;
+        let mut out = Vec::new();
+        for c in cmds {
+            for i in 0..u16::from(c.count) {
+                let addr = u8::try_from(u16::from(c.addr) + i).ok()?;
+                match cache.get(&addr) {
+                    Some((v, ts)) if *ts >= request_at => out.push((addr, *v)),
+                    _ => return None,
                 }
             }
         }
-        Err(MotorError::Timeout(format!(
-            "HighTorque register read timeout on motor id {}",
-            self.motor_id
-        )))
+        Some(out)
     }
 
     fn send_stop(&self) -> Result<()> {
@@ -317,12 +461,12 @@ impl HightorqueMotor {
 
     /// 控制类命令(vel/pos_vel/pos_vel_acc/pos_classic/stop/brake)。
     ///
-    /// 2026-09-29 起默认**扩展 29 位帧** `0x8000 | motor_id`,bit15 回复总开关
-    /// 置 1:对齐协议 PDF §1.4 示例的 `0x8000|id` 写法;v2.0.0 固件下电机对
-    /// 控制命令回发 8 字节状态反馈帧(协议 §3.2),由被动反馈路径
-    /// (`process_feedback_frame`)入状态缓存,控制流期间 `get_state` 持续新鲜。
-    /// `set_control_reply(false)` 可退回 v2.0.0 参考固件主机原行为:标准
-    /// 11 位帧、ID = 裸 `motor_id`(帧型上无 bit15 位置,电机不回帧)。
+    /// 默认**标准 11 位帧**、ID = 裸 `motor_id`——对齐 v2.0.0 参考固件
+    /// `can_send(hfdcanx, id, ...)`(协议 §1.3 控制类行)。2026-09-29 曾默认
+    /// 扩展 `0x8000|id` + bit15,以期每个控制帧带回 §3.2 状态反馈帧;
+    /// 2026-10-09 candump 真机证伪:非查询指令下电机只回一帧 DLC=0 空帧
+    /// (PDF §1.2 原文行为),无状态数据,故退回标准裸 id 帧。
+    /// `set_control_reply(true)` 可切回扩展写法(仅诊断/复现用)。
     fn send_control(&self, payload: &[u8], dlc: u8) -> Result<()> {
         if self.control_reply_enabled.load(Ordering::Acquire) {
             self.send_raw(u32::from(0x8000u16 | self.motor_id), payload, dlc, true)
@@ -419,12 +563,13 @@ impl MotorDevice for HightorqueMotor {
         }
         // 8 字节:寄存器读回复(0x27...)或控制命令附带的状态反馈(byte0=mode)。
         // 7 字节:设置 ACK(0x41...)。5 字节:固件版本回复(0xB5 0x02)。
-        // 其余长度(如 3 字节)不归被动反馈,由活动路径的 bus.recv 直接消费。
+        // 其余长度:可解析的寄存器读回复(int16 count1=4 字节、float=6 字节
+        // 等)——入寄存器缓存;不匹配则不归被动反馈,帧被丢弃。
         match frame.dlc {
             8 => true,
             7 => is_setting_ack(frame),
             5 => decode_version_reply(frame).is_some(),
-            _ => false,
+            _ => decode_register_reply(&frame.data[..frame.dlc as usize]).is_some(),
         }
     }
 
@@ -435,6 +580,17 @@ impl MotorDevice for HightorqueMotor {
         if is_setting_ack(&frame) {
             self.ack_seq.fetch_add(1, Ordering::Release);
             return Ok(());
+        }
+        // 寄存器读回复按地址入缓存(带时刻):0x27 0x01 状态回复的
+        // 0x01-0x03 也入(状态查询本身就是寄存器读), 短帧(4/6 字节)
+        // 只走这里。时间戳供 read_registers 的新鲜度校验认领。
+        if let Some(vals) = decode_register_reply(&frame.data[..frame.dlc as usize]) {
+            if let Ok(mut cache) = self.register_cache.lock() {
+                let now = Instant::now();
+                for (addr, v) in vals {
+                    cache.insert(addr, (v, now));
+                }
+            }
         }
         if let Some(state) = decode_feedback(frame, self.torque_coeff) {
             if state.can_id as u16 == self.motor_id {
@@ -531,32 +687,45 @@ mod tests {
         );
     }
 
-    /// 非阻塞状态查询: 无任何回帧时也立即 Ok(与阻塞版的行为差异所在),
-    /// 帧型为 17 01 查询、扩展 29 位 0x8000|id、8 字节。
+    /// 命令 8(读状态)是命令 7(通用寄存器读)的特例: 寄存器读原语发
+    /// 出的即协议文档的规范 `17 01` 查询帧(扩展 29 位 0x8000|id, dlc 2),
+    /// 无任何回帧时也立即 Ok——request_motor_feedback_async 删除后,
+    /// "发完即走"的非阻塞状态查询由这条路径承担。
     #[test]
-    fn request_motor_feedback_async_returns_without_waiting() {
+    fn state_read_via_register_request_sends_canonical_frame() {
         let (bus, motor) = make_motor(1);
-        // 不 push 任何回帧: 阻塞版在此会 Timeout, 异步版应立即 Ok
+        // 不 push 任何回帧: 阻塞版 read_registers 在此会 Timeout,
+        // request(只发送)应立即 Ok
         motor
-            .request_motor_feedback_async()
-            .expect("async feedback send");
+            .request_registers(&[ReadCmd {
+                addr: 0x01,
+                ty: crate::protocol::RegisterType::Int16,
+                count: 3,
+            }])
+            .expect("state read request send");
         let sent = bus.sent.lock().expect("sent frames");
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].arbitration_id, 0x8000 | 1);
         assert!(sent[0].is_extended, "查询帧应为扩展 29 位");
-        assert_eq!(sent[0].dlc, 8);
-        assert_eq!(&sent[0].data[..8], &[0x17, 0x01, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(sent[0].dlc, 2);
+        assert_eq!(&sent[0].data[..2], &[0x17, 0x01]);
     }
 
-    /// 发完即走 + 后台被动反馈路径的完整闭环: 异步查询后, 回帧经
-    /// process_feedback_frame(后台轮询线程的入口)入缓存, latest_state 即可读到。
+    /// 发完即走 + 后台被动反馈路径的完整闭环: 寄存器读请求(即 17 01
+    /// 状态查询)发出后, 回帧经 process_feedback_frame(后台轮询线程的
+    /// 入口)同时写入状态缓存与寄存器缓存——latest_state 与
+    /// cached_register 读到的是同一帧。
     #[test]
-    fn async_query_reply_lands_in_state_cache_via_passive_path() {
+    fn state_read_request_reply_feeds_both_caches_via_passive_path() {
         let (_bus, motor) = make_motor(1);
         assert!(motor.latest_state().is_none());
         motor
-            .request_motor_feedback_async()
-            .expect("async feedback send");
+            .request_registers(&[ReadCmd {
+                addr: 0x01,
+                ty: crate::protocol::RegisterType::Int16,
+                count: 3,
+            }])
+            .expect("state read request send");
         // 模拟 CoreController 后台线程收到 27 01 回复(id<<8 仲裁 ID)
         let reply = CanFrame {
             arbitration_id: 0x0100,
@@ -570,6 +739,10 @@ mod tests {
         assert_eq!(st.can_id, 1);
         // pos_raw=0x1234=4660 → 4660*0.0001*2π
         assert!((st.pos - 0.4660 * std::f32::consts::TAU).abs() < 1e-4);
+        // 同一帧按地址入寄存器缓存: 0x01/0x02/0x03 各一个 int16
+        assert!(matches!(motor.cached_register(0x01), Some(RegisterValue::I16(0x1234))));
+        assert!(matches!(motor.cached_register(0x02), Some(RegisterValue::I16(0x5678))));
+        assert!(matches!(motor.cached_register(0x03), Some(RegisterValue::I16(0x0A00))));
     }
 
     /// 收敛(2026-09-30)回归:CoreController 后台收帧线程把 27 01 回帧
@@ -674,10 +847,11 @@ mod tests {
         }
     }
 
-    /// 2026-09-29:控制命令默认走扩展 29 位帧、ID=`0x8000|motor_id`、bit15
-    /// 回复总开关置 1(协议 PDF §1.4 示例写法;§3.2 控制附带状态反馈)。
+    /// 2026-10-09:控制命令默认走**标准 11 位裸 id 帧**(v2.0.0 参考固件
+    /// 原行为)。2026-09-29 的扩展 `0x8000|id` + bit15 已被 candump 真机
+    /// 证伪退回——bit15 于非查询指令只换来一帧 DLC=0 空帧,无状态数据。
     #[test]
-    fn control_commands_default_to_extended_reply_frames() {
+    fn control_commands_default_to_standard_bare_id_frames() {
         let (bus, motor) = make_motor(1);
         // 速度命令(0x07 0x07)
         motor.send_cmd_vel(1.0).expect("vel");
@@ -692,25 +866,26 @@ mod tests {
         let sent = bus.sent.lock().expect("sent");
         assert_eq!(sent.len(), 4);
         for f in sent.iter() {
-            assert!(f.is_extended, "控制帧默认应为扩展 29 位");
-            assert_eq!(f.arbitration_id, 0x8001, "控制帧 ID 应为 0x8000|motor_id");
+            assert!(!f.is_extended, "控制帧默认应为标准 11 位");
+            assert_eq!(f.arbitration_id, 1, "控制帧 ID 应为裸 motor_id");
             assert!(!f.is_rx);
         }
     }
 
-    /// set_control_reply(false):退回 v2.0.0 参考固件主机原行为——标准 11 位
-    /// 裸 id、无回复位(老固件不认扩展控制帧时的兼容路径)。
+    /// set_control_reply(true):切到 PDF §1.4 示例写法——扩展 29 位
+    /// `0x8000|id` + bit15。真机行为:电机对非查询指令回一帧 DLC=0
+    /// 空帧(§1.2),无状态数据,仅诊断/复现用。
     #[test]
-    fn control_commands_legacy_mode_uses_standard_bare_id() {
+    fn control_commands_reply_mode_uses_extended_frames() {
         let (bus, motor) = make_motor(1);
-        motor.set_control_reply(false);
+        motor.set_control_reply(true);
         motor.send_cmd_pos_vel(0.5, 1.0).expect("pos_vel");
         motor.send_stop().expect("stop");
         let sent = bus.sent.lock().expect("sent");
         assert_eq!(sent.len(), 2);
         for f in sent.iter() {
-            assert!(!f.is_extended, "legacy 控制帧应为标准 11 位");
-            assert_eq!(f.arbitration_id, 1, "legacy 控制帧 ID 应为裸 motor_id");
+            assert!(f.is_extended, "reply 控制帧应为扩展 29 位");
+            assert_eq!(f.arbitration_id, 0x8001, "reply 控制帧 ID 应为 0x8000|motor_id");
             assert!(!f.is_rx);
         }
     }
@@ -724,8 +899,8 @@ mod tests {
         let sent = bus.sent.lock().expect("sent");
         assert_eq!(sent.len(), 1);
         let f = &sent[0];
-        assert!(f.is_extended, "清错帧默认应为扩展 29 位");
-        assert_eq!(f.arbitration_id, 0x8001, "清错帧 ID 应为 0x8000|motor_id");
+        assert!(!f.is_extended, "清错帧默认应为标准 11 位(参考固件原行为)");
+        assert_eq!(f.arbitration_id, 1, "清错帧 ID 应为裸 motor_id");
         assert_eq!(f.dlc, 3);
         assert_eq!(&f.data[..3], &[0x01, 0x00, 0x00]);
     }
@@ -758,6 +933,149 @@ mod tests {
         }
     }
 
+    /// 回归:read_registers 走"发送 + 轮询新鲜缓存"路径,回复由被动
+    /// 路径(后台线程入口 process_feedback_frame)入缓存。等值期间
+    /// 到达其它事务的寄存器回复(并发 `17 01` 状态查询的 `0x27 0x01`,
+    /// 地址 0x01-0x03)按地址入各自的缓存键,不满足 0x0E 请求;等到
+    /// 0x0E 的回复入缓后才返回其值。
+    #[test]
+    fn read_registers_waits_for_fresh_reply_at_requested_address() {
+        let (_bus, motor) = make_motor(1);
+        let m = motor.clone();
+        // 模拟后台轮询线程: 请求发出 10ms 后先送来别人的状态回复,
+        // 再送来本事务请求的 0x0E 温度回复
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            m.process_feedback_frame(CanFrame {
+                arbitration_id: 0x0100,
+                data: [0x27, 0x01, 0x34, 0x12, 0x09, 0x00, 0x00, 0x00],
+                dlc: 8,
+                is_extended: true,
+                is_rx: true,
+            })
+            .expect("merge state reply");
+            m.process_feedback_frame(CanFrame {
+                arbitration_id: 0x0100,
+                data: [0x25, 0x0E, 0x64, 0x00, 0, 0, 0, 0],
+                dlc: 4,
+                is_extended: true,
+                is_rx: true,
+            })
+            .expect("merge temp reply");
+        });
+        let vals = motor
+            .read_registers(
+                &[ReadCmd {
+                    addr: 0x0E,
+                    ty: crate::protocol::RegisterType::Int16,
+                    count: 1,
+                }],
+                Duration::from_millis(500),
+            )
+            .expect("应等到 0x0E 的新鲜回复");
+        handle.join().expect("thread join");
+        assert_eq!(vals.len(), 1);
+        assert_eq!(vals[0].0, 0x0E, "返回的应是地址 0x0E 的值");
+        assert!(matches!(
+            vals[0].1,
+            crate::protocol::RegisterValue::I16(0x64)
+        ));
+    }
+
+    /// 请求之前入缓存的旧值不满足新鲜度(ts < request_at),不能被
+    /// 本次 read_registers 认领——时间戳就是事务号。
+    #[test]
+    fn read_registers_rejects_stale_cached_value() {
+        let (_bus, motor) = make_motor(1);
+        // 先入缓一个 0x0E 旧值, 再发起读: 旧值早于 request_at
+        motor
+            .process_feedback_frame(CanFrame {
+                arbitration_id: 0x0100,
+                data: [0x25, 0x0E, 0x64, 0x00, 0, 0, 0, 0],
+                dlc: 4,
+                is_extended: true,
+                is_rx: true,
+            })
+            .expect("merge old reply");
+        let r = motor.read_registers(
+            &[ReadCmd {
+                addr: 0x0E,
+                ty: crate::protocol::RegisterType::Int16,
+                count: 1,
+            }],
+            Duration::from_millis(30),
+        );
+        assert!(
+            matches!(r, Err(MotorError::Timeout(_))),
+            "旧缓存值不应被认领, 应超时: {r:?}"
+        );
+    }
+
+    /// 非阻塞路径:request_registers 发完即走(帧格式/扩展 id 正确),
+    /// cached_register 在回复入缓前为 None、入缓后可读;accepts_frame
+    /// 认领 4 字节的寄存器回复(此前该长度被拒收丢弃)。
+    #[test]
+    fn request_registers_then_cached_register_via_passive_path() {
+        let (bus, motor) = make_motor(1);
+        motor
+            .request_registers(&[ReadCmd {
+                addr: 0x0E,
+                ty: crate::protocol::RegisterType::Int16,
+                count: 1,
+            }])
+            .expect("send query");
+        let sent = bus.sent.lock().expect("sent frames");
+        assert_eq!(sent.len(), 1, "request_registers 只发一帧不等回帧");
+        assert_eq!(sent[0].arbitration_id, 0x8000 | 1, "查询帧应为扩展 29 位");
+        assert_eq!(sent[0].dlc, 2, "int16 count1 读请求载荷 2 字节");
+        assert_eq!(&sent[0].data[..2], &[0x15, 0x0E], "cmd=0x15(int16 count1) addr=0x0E");
+        drop(sent);
+
+        let reply = CanFrame {
+            arbitration_id: 0x0100,
+            data: [0x25, 0x0E, 0x64, 0x00, 0, 0, 0, 0],
+            dlc: 4,
+            is_extended: true,
+            is_rx: true,
+        };
+        assert!(
+            MotorDevice::accepts_frame(&*motor, &reply),
+            "4 字节寄存器回复应被被动路径认领"
+        );
+        assert!(motor.cached_register(0x0E).is_none(), "入缓前应无值");
+        motor.process_feedback_frame(reply).expect("merge");
+        assert!(matches!(
+            motor.cached_register(0x0E),
+            Some(crate::protocol::RegisterValue::I16(0x64))
+        ));
+    }
+
+    /// 0x27 0x01 状态回复同时入状态缓存与寄存器缓存(状态查询本身就是
+    /// 0x01-0x03 的寄存器读),latest_state 与 cached_register 均可读。
+    #[test]
+    fn state_reply_feeds_both_state_and_register_cache() {
+        let (_bus, motor) = make_motor(1);
+        motor
+            .process_feedback_frame(CanFrame {
+                arbitration_id: 0x0100,
+                data: [0x27, 0x01, 0x34, 0x12, 0x09, 0x00, 0x00, 0x00],
+                dlc: 8,
+                is_extended: true,
+                is_rx: true,
+            })
+            .expect("merge");
+        let st = motor.latest_state().expect("state cache");
+        assert!((st.pos - (0x1234 as f32 * 0.0001 * std::f32::consts::TAU)).abs() < 1e-6);
+        assert!(matches!(
+            motor.cached_register(0x01),
+            Some(crate::protocol::RegisterValue::I16(0x1234))
+        ));
+        assert!(matches!(
+            motor.cached_register(0x03),
+            Some(crate::protocol::RegisterValue::I16(0x0000))
+        ));
+    }
+
     /// P2-14:普通位置模式 `0x07 0x07` 字节布局,力矩 None → 0x8000(无限制),
     /// 标准 11 位帧。对照参考固件 `motor_control_pos` 模板 `[0x07,0x07,pos@2-3,
     /// 0x00,0x00,tqe@6-7]`。
@@ -771,8 +1089,8 @@ mod tests {
         let sent = bus.sent.lock().expect("sent");
         assert_eq!(sent.len(), 1);
         let f = &sent[0];
-        assert!(f.is_extended, "普通位置帧默认应为扩展 29 位");
-        assert_eq!(f.arbitration_id, 0x8001);
+        assert!(!f.is_extended, "普通位置帧默认应为标准 11 位");
+        assert_eq!(f.arbitration_id, 1);
         assert_eq!(&f.data[0..2], &[0x07, 0x07]);
         // pos = 5000 LE
         assert_eq!(i16::from_le_bytes([f.data[2], f.data[3]]), 5000);
@@ -794,5 +1112,138 @@ mod tests {
             .expect("pos_classic");
         let f = &bus.sent.lock().expect("sent")[0];
         assert_eq!(i16::from_le_bytes([f.data[6], f.data[7]]), 200);
+    }
+
+    /// 力矩模式(协议命令 5):`05 13 <tqe16>` 4 字节;1.1 Nm × General(k=0.5)
+    /// → ((1.1/0.5)*100) = 220 = 0x00DC。
+    #[test]
+    fn send_cmd_torque_byte_layout() {
+        let (bus, motor) = make_motor(1);
+        motor.send_cmd_torque(1.1).expect("torque");
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 1);
+        let f = &sent[0];
+        assert_eq!(f.dlc, 4);
+        assert_eq!(&f.data[..4], &[0x05, 0x13, 0xDC, 0x00]);
+        assert!(!f.is_extended, "力矩帧默认走控制通道(标准裸 id)");
+        assert_eq!(f.arbitration_id, 1);
+    }
+
+    /// enable 为语义空操作(方案 B,2026-10-08):返回 Ok 且不向总线发
+    /// 任何帧。协议无使能帧、命令即执行,postcondition 恒成立;清错/
+    /// 停机由 clear_error()/disable() 显式完成,enable 保持零副作用。
+    /// 此契约同时保证混总线 enable_all 不再被 Err 中止毒化。
+    #[test]
+    fn enable_is_frameless_noop() {
+        let (bus, motor) = make_motor(1);
+        motor.enable().expect("enable is a no-op success");
+        assert!(
+            bus.sent.lock().expect("sent").is_empty(),
+            "enable must not send any frame"
+        );
+    }
+
+    /// 运行模式切换(协议命令 6):`01 00 <mode>` 3 字节,与 send_stop 同款。
+    #[test]
+    fn send_run_mode_byte_layout() {
+        let (bus, motor) = make_motor(1);
+        motor.send_run_mode(5).expect("run mode");
+        motor.send_run_mode(17).expect("run mode 17 保留值仍合法");
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 2);
+        assert_eq!(&sent[0].data[..3], &[0x01, 0x00, 0x05]);
+        assert_eq!(&sent[1].data[..3], &[0x01, 0x00, 0x11]);
+        assert_eq!(sent[0].arbitration_id, 1);
+        assert!(!sent[0].is_extended, "run_mode 走控制通道(标准裸 id)");
+    }
+
+    #[test]
+    fn send_run_mode_rejects_above_17() {
+        let (bus, motor) = make_motor(1);
+        for mode in [18, 100, 255] {
+            assert!(
+                motor.send_run_mode(mode).is_err(),
+                "mode {mode} should be rejected"
+            );
+        }
+        // 拒绝时不发帧
+        assert!(bus.sent.lock().expect("sent").is_empty());
+    }
+
+    /// 刹车 = 模式 15(表2)。
+    #[test]
+    fn brake_sends_mode_15_frame() {
+        let (bus, motor) = make_motor(1);
+        motor.brake().expect("brake");
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(&sent[0].data[..3], &[0x01, 0x00, 0x0F]);
+        assert_eq!(sent[0].dlc, 3);
+    }
+
+    /// DQ 电压(协议命令 6):模式写 + 寄存器写拼一帧 7 字节,
+    /// `01 00 08 05 1B <volt16>`;1.0 V → 0.1 V/LSB → raw 10。
+    #[test]
+    fn send_cmd_dq_voltage_byte_layout() {
+        let (bus, motor) = make_motor(1);
+        motor.send_cmd_dq_voltage(1.0).expect("dq voltage");
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 1);
+        let f = &sent[0];
+        assert_eq!(f.dlc, 7);
+        assert_eq!(
+            &f.data[..7],
+            &[0x01, 0x00, 0x08, 0x05, 0x1B, 0x0A, 0x00]
+        );
+    }
+
+    /// DQ 电流(协议命令 6):`01 00 09 05 1C <cur16>`;0.5 A → raw 5。
+    #[test]
+    fn send_cmd_dq_current_byte_layout() {
+        let (bus, motor) = make_motor(1);
+        motor.send_cmd_dq_current(0.5).expect("dq current");
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 1);
+        let f = &sent[0];
+        assert_eq!(f.dlc, 7);
+        assert_eq!(&f.data[..7], &[0x01, 0x00, 0x09, 0x05, 0x1C, 0x05, 0x00]);
+    }
+
+    /// 通用寄存器写(协议命令 9 派生):`05 <addr> <val16>` 4 字节。
+    /// 控制类走控制通道(默认标准 11 位裸 id)、配置类恒走扩展 `0x8000|id`
+    /// 查询通道——config 类不随 control_reply 开关切换帧型。
+    #[test]
+    fn write_register_both_frame_classes() {
+        let (bus, motor) = make_motor(1);
+        // 控制类(如前馈扭矩寄存器 0x22):默认标准裸 id
+        motor.write_register(0x22, 500, false).expect("control write");
+        // 配置类:仍走 send_query 扩展帧,即使 control_reply 开
+        motor.set_control_reply(true);
+        motor.write_register(0x30, 100, true).expect("config write");
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 2);
+        assert_eq!(&sent[0].data[..4], &[0x05, 0x22, 0xF4, 0x01]);
+        assert!(!sent[0].is_extended);
+        assert_eq!(sent[0].arbitration_id, 1);
+        assert_eq!(&sent[1].data[..4], &[0x05, 0x30, 0x64, 0x00]);
+        assert!(sent[1].is_extended, "config 类写必须恒为扩展帧");
+        assert_eq!(sent[1].arbitration_id, 0x8000 | 1);
+    }
+
+    /// 周期上报(协议命令 10):`05 B4 02 <t_ms16>` 5 字节扩展帧;0=停止。
+    #[test]
+    fn set_periodic_report_byte_layout() {
+        let (bus, motor) = make_motor(1);
+        motor.set_periodic_report(10).expect("periodic on");
+        motor.set_periodic_report(0).expect("periodic off");
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 2);
+        for f in sent.iter() {
+            assert_eq!(f.dlc, 5);
+            assert!(f.is_extended, "周期上报配置帧应为扩展 0x8000|id");
+            assert_eq!(f.arbitration_id, 0x8001);
+        }
+        assert_eq!(&sent[0].data[..5], &[0x05, 0xB4, 0x02, 0x0A, 0x00]);
+        assert_eq!(&sent[1].data[..5], &[0x05, 0xB4, 0x02, 0x00, 0x00]);
     }
 }

@@ -112,10 +112,17 @@ cargo run -p motor_cli --release -- \
 - `scan`
 - `read` / `ping`
 - `mit`（统一接口）
-- `pos` / `vel` / `tqe`
+- `pos` / `vel` / `tqe`（力矩模式 `05 13`，`--tau <Nm>` 物理量，型号力矩系数补偿）
 - `pos-vel-tqe`
-- `volt` / `cur`
-- `stop` / `brake` / `rezero` / `conf-write` / `timed-read`
+- `pos-vel-acc`（梯形 `07 2d`，固件 v4.6.0+）：`--pos <rad> --vlim <rad/s> --acc <rad/s^2>`
+- `volt`（DQ 电压模式 `01 00 08 05 1B`）：`--volt <V>`（0.1 V/LSB，协议只定义 Q 分量）
+- `cur`（DQ 电流模式 `01 00 09 05 1C`）：`--cur <A>`（0.1 A/LSB）
+- `set-mode`（运行模式切换 `01 00 <mode>`）：`--run-mode <0-17>`（表2；0=停止并清错，8=DQ 电压，9=DQ 电流，10=位置，15=刹车）
+- `version`（固件版本 `15 B5 02`，打印 `firmware=major.minor.patch`）
+- `read-reg`（通用寄存器读 `17` 族）：`--addr <hex|dec>` 必填、`--count`（1-3，默认 1）、`--ty`（`0|i8`/`1|i16`/`2|i32`/`3|f32`，缺省回落寄存器表，无则必填）；打印 raw 值与寄存器名
+- `write-reg`（通用寄存器写 `05 <addr> <val16>`）：`--addr` 必填、`--value <int16>`、`--config`（0/1，1=配置类走扩展帧，缺省 0 走控制通道）
+- `periodic-report`（周期上报 `05 B4 02 <t_ms>`）：`--period-ms`（≥1 开启电机主动状态流，0 停止；`timed-read` 为旧名别名）
+- `stop` / `brake`（模式 15，三相短接阻尼刹车）/ `rezero` / `conf-write`
 
 统一单位接口（与其他电机保持一致）：
 
@@ -124,9 +131,9 @@ cargo run -p motor_cli --release -- \
 - `--tau`：扭矩（Nm）
 - `--kp`、`--kd`：打包进 v2.0.0 MIT 位打包帧（固件 v4.6.0+；量程 kp ±400、kd ±100，超界饱和）
 
-底层原始接口（调试）：
+底层原始接口（调试，仅位置/速度）：
 
-- `--raw-pos`、`--raw-vel`、`--raw-tqe`
+- `--raw-pos`、`--raw-vel`（力矩/电压/电流已统一为物理量 `--tau`/`--volt`/`--cur`，由 vendor 侧编码）
 
 示例：
 
@@ -153,6 +160,22 @@ cargo run -p motor_cli --release -- \
 # 停止
 cargo run -p motor_cli --release -- \
   --vendor hightorque --channel can0 --motor-id 1 --mode stop
+```
+
+```bash
+# 梯形运动到 +90 度，限速 1 rad/s、加速度 2 rad/s^2
+cargo run -p motor_cli --release -- \
+  --vendor hightorque --channel can0 --motor-id 1 \
+  --mode pos-vel-acc --pos 1.5708 --vlim 1.0 --acc 2.0
+```
+
+```bash
+# 查询固件版本 / 读 3 个连续寄存器（位置/速度/转矩，int16）
+cargo run -p motor_cli --release -- \
+  --vendor hightorque --channel can0 --motor-id 1 --mode version
+cargo run -p motor_cli --release -- \
+  --vendor hightorque --channel can0 --motor-id 1 \
+  --mode read-reg --addr 0x01 --count 3 --ty i16
 ```
 
 ## MyActuator 示例

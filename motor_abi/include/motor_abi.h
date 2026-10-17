@@ -20,6 +20,8 @@ typedef struct MotorState {
   float torq;
   float t_mos;
   float t_rotor;
+  // HighTorque: table-3 fault code (0 = no fault). Other vendors: always 0.
+  uint8_t fault_code;
 } MotorState;
 
 // Unified units across all vendors:
@@ -92,7 +94,6 @@ int32_t motor_handle_send_force_pos(MotorHandle* motor, float target_position, f
 
 int32_t motor_handle_store_parameters(MotorHandle* motor);
 int32_t motor_handle_request_feedback(MotorHandle* motor);
-int32_t motor_handle_hightorque_request_feedback_async(MotorHandle* motor);
 int32_t motor_handle_set_can_timeout_ms(MotorHandle* motor, uint32_t timeout_ms);
 
 int32_t motor_handle_write_register_f32(MotorHandle* motor, uint8_t rid, float value);
@@ -123,6 +124,34 @@ int32_t motor_handle_damiao_get_param_f32(MotorHandle* motor, uint16_t param_id,
 int32_t motor_handle_damiao_get_param_u32(MotorHandle* motor, uint16_t param_id, uint32_t timeout_ms, uint32_t* out_value);
 int32_t motor_handle_damiao_write_param_f32(MotorHandle* motor, uint16_t param_id, float value);
 int32_t motor_handle_damiao_write_param_u32(MotorHandle* motor, uint16_t param_id, uint32_t value);
+
+// HighTorque-only extensions (reject non-HighTorque motors):
+// Trapezoid control (07 2d, firmware v4.6.0+).
+int32_t motor_handle_hightorque_send_pos_vel_acc(MotorHandle* motor, float target_position, float velocity_limit, float acceleration_limit);
+// Classic position mode (07 07): torque limit in Nm; pass NaN for unlimited.
+int32_t motor_handle_hightorque_send_pos_classic(MotorHandle* motor, float target_position, float torque_limit_nm);
+// Firmware version query (15 B5 02), blocking with timeout.
+int32_t motor_handle_hightorque_request_firmware_version(MotorHandle* motor, uint32_t timeout_ms, uint8_t* out_major, uint8_t* out_minor, uint8_t* out_patch);
+// Generic register read (17 family): ty 0=Int8/1=Int16/2=Int32/3=Float, count 1-3
+// consecutive registers; writes `count` f32 values (raw integer values cast to f32).
+int32_t motor_handle_hightorque_get_register(MotorHandle* motor, uint8_t addr, uint8_t ty, uint8_t count, uint32_t timeout_ms, float* out_values);
+// Torque mode (05 13): direct torque target in Nm (model coeff compensated).
+int32_t motor_handle_hightorque_send_torque(MotorHandle* motor, float torque_nm);
+// DQ voltage mode (01 00 08 05 1B): Q-axis voltage in V (0.1 V/LSB).
+int32_t motor_handle_hightorque_send_dq_voltage(MotorHandle* motor, float voltage_v);
+// DQ current mode (01 00 09 05 1C): Q-axis current in A (0.1 A/LSB).
+int32_t motor_handle_hightorque_send_dq_current(MotorHandle* motor, float current_a);
+// Brake (run mode 15, 01 00 0F): all phases shorted damping brake.
+int32_t motor_handle_hightorque_brake(MotorHandle* motor);
+// Run mode switch (01 00 <mode>, register 0x000): mode 0-17 per protocol table 2
+// (0 = stop & clear error). Sends a real frame, unlike motor_handle_ensure_mode.
+int32_t motor_handle_hightorque_set_run_mode(MotorHandle* motor, uint8_t mode);
+// Generic register write (05 <addr> <val16>): config_class != 0 sends via extended
+// 0x8000|id frame (config registers), 0 via the control channel (control targets).
+int32_t motor_handle_hightorque_write_register(MotorHandle* motor, uint8_t addr, int16_t value, uint8_t config_class);
+// Periodic status report (05 B4 02 <t_ms16>, extended frame): period_ms >= 1 ms;
+// pass 0 to stop the motor-initiated 27 01 status stream.
+int32_t motor_handle_hightorque_set_periodic_report(MotorHandle* motor, uint16_t period_ms);
 
 #ifdef __cplusplus
 }

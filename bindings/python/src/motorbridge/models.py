@@ -20,3 +20,5 @@ class MotorState:
     torq: float
     t_mos: float
     t_rotor: float
+    # HighTorque: 表3 故障码(0=无故障); 其余厂商恒 0。
+    fault_code: int = 0

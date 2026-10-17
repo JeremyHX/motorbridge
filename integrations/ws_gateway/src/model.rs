@@ -110,6 +110,19 @@ pub(crate) enum ActiveCommand {
         pos: f32,
         vlim: f32,
     },
+    /// HighTorque 梯形控制(07 2d):位置 + 速度上限 + 加速度上限。
+    /// 其它厂商协议无对应命令,apply_active 返回不支持。
+    PosVelAcc {
+        pos: f32,
+        vlim: f32,
+        acc: f32,
+    },
+    /// HighTorque 力矩模式(05 13):目标力矩(Nm,物理量,型号系数补偿)。
+    /// 其它厂商协议无独立力矩目标命令,apply_active 返回不支持
+    /// (MIT 前馈力矩走 `mit` op)。
+    Torque {
+        tau: f32,
+    },
     Vel {
         vel: f32,
     },

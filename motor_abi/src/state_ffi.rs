@@ -24,6 +24,7 @@ pub extern "C" fn motor_handle_get_state(
                     torq: state.torq,
                     t_mos: state.t_mos,
                     t_rotor: state.t_rotor,
+                    fault_code: 0,
                 };
             } else {
                 *out = MotorState::default();
@@ -41,6 +42,7 @@ pub extern "C" fn motor_handle_get_state(
                     torq: state.torque_permille as f32 / 1000.0,
                     t_mos: 0.0,
                     t_rotor: 0.0,
+                    fault_code: 0,
                 };
             }
             Err(e) => {
@@ -60,6 +62,7 @@ pub extern "C" fn motor_handle_get_state(
                     torq: state.current_a,
                     t_mos: f32::from(state.temperature_c),
                     t_rotor: 0.0,
+                    fault_code: 0,
                 };
             } else {
                 *out = MotorState::default();
@@ -96,6 +99,7 @@ pub extern "C" fn motor_handle_get_state(
                     torq: state.torque,
                     t_mos: state.temperature_c,
                     t_rotor: 0.0,
+                    fault_code: 0,
                 };
             } else {
                 *out = MotorState::default();
@@ -113,6 +117,8 @@ pub extern "C" fn motor_handle_get_state(
                     torq: state.torq,
                     t_mos: state.t_mos,
                     t_rotor: state.t_rotor,
+                    // 表3 故障码(0=无故障)。此前该字段被静默丢弃。
+                    fault_code: state.fault_code,
                 };
             } else {
                 *out = MotorState::default();

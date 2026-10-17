@@ -525,6 +525,18 @@ pub(crate) fn tqe_restore_raw(raw: i16, c: TorqueCoeff) -> f32 {
     raw as f32 * 0.01 * c.k + c.d
 }
 
+/// DQ 电压模式:V → int16 raw(协议 §1 通信命令 6,0.1 V/LSB)。超界饱和。
+pub(crate) fn volts_to_raw(voltage_v: f32) -> i16 {
+    let v = (voltage_v * 10.0).round() as i32;
+    v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+/// DQ 电流模式:A → int16 raw(协议 §1 通信命令 6,0.1 A/LSB)。超界饱和。
+pub(crate) fn amps_to_raw(current_a: f32) -> i16 {
+    let v = (current_a * 10.0).round() as i32;
+    v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
 /// 加速度(rad/s²)→梯形模式 int16 原始值。
 ///
 /// 参考固件 `motor_set_pos_vel_acc` 经 `conv_to_turns` → `acc_float2int(TINT16)`
@@ -701,6 +713,9 @@ pub(crate) fn encode_read(cmds: &[ReadCmd]) -> Option<Vec<u8>> {
 ///
 /// 非回复帧(首字节高半字节 != 0010)或长度不足时返回 `None`。
 pub(crate) fn decode_register_reply(data: &[u8]) -> Option<Vec<(u8, RegisterValue)>> {
+    if data.is_empty() {
+        return None;
+    }
     let mut out = Vec::new();
     let mut pos = 0usize;
     while pos < data.len() {
@@ -905,6 +920,12 @@ mod tests {
         assert_eq!(vals.len(), 2);
         assert_eq!(vals[0].0, 0x01);
         assert_eq!(vals[1].0, 0x0F);
+    }
+
+    #[test]
+    fn decode_register_reply_rejects_empty_data() {
+        // 电机会回 DLC=0 空帧(如 bit15 置位时), 空数据不是回复
+        assert!(decode_register_reply(&[]).is_none());
     }
 
     // ----- 状态反馈帧(P1-4) -----
