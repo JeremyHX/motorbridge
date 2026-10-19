@@ -27,7 +27,6 @@ print-and-continue。差异点见各步注释。
 - ``enable`` / ``disable`` ← HT 的 enable=语义空操作(2026-10-08 起不发帧
   直接成功),disable=send_stop
 - ``set_zero_position`` + ``store_parameters``(改写电机配置,默认开,见下)
-- ``hightorque_request_firmware_version``(15 B5 02 固件版本,只读诊断)
 - ``hightorque_get_register``(17 族通用寄存器读 0x01-0x03,只读诊断)
 - ``send_pos_vel``(位置模式,协同 pos-vel 0x07 0x35,按当前位小幅正弦振荡)
 - ``hightorque_send_pos_vel_acc``(梯形 07 2d,同幅正弦;需固件 v4.6.0+)
@@ -197,13 +196,8 @@ def _run_all(motor, write_config: bool) -> None:
     except CallError as exc:
         print(f"[2.clear_error] 失败: {exc}(继续)")
 
-    # 2b. 只读诊断(无运动):固件版本(15 B5 02)与通用寄存器读(17 族,
-    #     0x01-0x03 = 位置/速度/转矩 int16,raw 值,物理换算按寄存器表)。
-    try:
-        major, minor, patch = motor.hightorque_request_firmware_version()
-        print(f"[2b.firmware] {major}.{minor}.{patch}")
-    except CallError as exc:
-        print(f"[2b.firmware] 失败: {exc}(继续)")
+    # 2b. 只读诊断(无运动):通用寄存器读(17 族,0x01-0x03 = 位置/速度/
+    #     转矩 int16,raw 值,物理换算按寄存器表)。
     try:
         vals = motor.hightorque_get_register(0x01, ty=1, count=3)
         print(f"[2b.read_reg] 0x01-0x03 raw={vals}")

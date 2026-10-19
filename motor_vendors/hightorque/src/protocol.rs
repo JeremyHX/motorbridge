@@ -187,13 +187,11 @@ pub(crate) fn decode_feedback(frame: CanFrame, c: TorqueCoeff) -> Option<Hightor
     decode_read_reply(frame, c).or_else(|| decode_status_frame(&frame, c))
 }
 
-// ----- 设置 ACK 与固件版本回复(参考固件 motor.c 设置/版本解析分支)-----
+// ----- 设置 ACK(参考固件 motor.c 设置解析分支)-----
 //
 // 设置类命令成功后,电机回 7 字节 ACK:`0x41 0x01 0x04` + `"OK\r\n"`。
-// 固件版本查询(`0x15 0xB5 0x02`)回 5 字节,签名 `data[1]==0xB5 && data[2]==0x02`,
-// 版本号按半位打包(镜像 `motor.c`):major=data[4]>>4、minor=(data[4]&0x0F)|(data[3]>>4)、
-// patch=data[3]&0x0F。这两类帧都是"事务性回复",不属于被动反馈(decode_feedback 返回 None),
-// 由各自的活动读取路径(send_with_ack / request_firmware_version)消费。
+// 这类帧是"事务性回复",不属于被动反馈(decode_feedback 返回 None),
+// 由活动读取路径(send_with_ack)消费。
 
 /// 设置类命令的成功 ACK(7 字节):`0x41 0x01 0x04` + `"OK\r\n"`。
 pub const SETTING_ACK: [u8; 7] = [0x41, 0x01, 0x04, 0x4F, 0x4B, 0x0D, 0x0A];
@@ -201,33 +199,6 @@ pub const SETTING_ACK: [u8; 7] = [0x41, 0x01, 0x04, 0x4F, 0x4B, 0x0D, 0x0A];
 /// 判断一帧是否为设置 ACK(dlc==7 且前 7 字节精确匹配 `SETTING_ACK`)。
 pub(crate) fn is_setting_ack(frame: &CanFrame) -> bool {
     frame.dlc == 7 && frame.data.starts_with(&SETTING_ACK)
-}
-
-/// 电机固件版本(major.minor.patch,各 4 位编码于 5 字节回复)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FirmwareVersion {
-    pub major: u8,
-    pub minor: u8,
-    pub patch: u8,
-}
-
-impl FirmwareVersion {
-    pub fn as_tuple(self) -> (u8, u8, u8) {
-        (self.major, self.minor, self.patch)
-    }
-}
-
-/// 解析固件版本回复(5 字节,签名 `data[1]==0xB5 && data[2]==0x02`)。
-/// 长度或签名不符时返回 `None`(不回退到固件的 3.9.1 默认值,避免伪造版本)。
-pub(crate) fn decode_version_reply(frame: &CanFrame) -> Option<FirmwareVersion> {
-    if frame.dlc != 5 || frame.data[1] != 0xB5 || frame.data[2] != 0x02 {
-        return None;
-    }
-    Some(FirmwareVersion {
-        major: frame.data[4] >> 4,
-        minor: (frame.data[4] & 0x0F) | (frame.data[3] >> 4),
-        patch: frame.data[3] & 0x0F,
-    })
 }
 
 // ----- P2-16 单位与数据类型选择 -----
@@ -1369,50 +1340,6 @@ mod tests {
         // 状态帧
         let status = frame_with(0x0100, [0x0A, 0x00, 0, 0, 0, 0, 0, 0], 8, true);
         assert!(!is_setting_ack(&status));
-    }
-
-    // ----- 固件版本回复(P1-5)-----
-    //
-    // 参考 `motor.c::motor_process_state` 版本分支的半位布局。
-
-    #[test]
-    fn decode_version_reply_extracts_major_minor_patch() {
-        // data[3]=0x12 → patch=2, minor_hi=1;data[4]=0x34 → major=3, minor_lo=4
-        // → major=3, minor=4|1=5, patch=2
-        let f = frame_with(0x0100, [0x15, 0xB5, 0x02, 0x12, 0x34, 0, 0, 0], 5, true);
-        let v = decode_version_reply(&f).expect("version decodes");
-        assert_eq!(v.as_tuple(), (3, 5, 2));
-    }
-
-    #[test]
-    fn decode_version_reply_zero_version() {
-        let f = frame_with(0x0100, [0x00, 0xB5, 0x02, 0x00, 0x00, 0, 0, 0], 5, true);
-        let v = decode_version_reply(&f).expect("version decodes");
-        assert_eq!(v.as_tuple(), (0, 0, 0));
-    }
-
-    #[test]
-    fn decode_version_reply_max_nibbles() {
-        // data[3]=0xFF → patch=0xF, minor_hi=0xF;data[4]=0xFF → major=0xF, minor_lo=0xF
-        // → major=15, minor=15|15=15, patch=15
-        let f = frame_with(0x0100, [0x00, 0xB5, 0x02, 0xFF, 0xFF, 0, 0, 0], 5, true);
-        let v = decode_version_reply(&f).expect("version decodes");
-        assert_eq!(v.as_tuple(), (15, 15, 15));
-    }
-
-    #[test]
-    fn decode_version_reply_rejects_wrong_signature_and_length() {
-        // 签名错(data[2]!=0x02)
-        let bad_sig = frame_with(0x0100, [0x00, 0xB5, 0x03, 0x12, 0x34, 0, 0, 0], 5, true);
-        assert!(decode_version_reply(&bad_sig).is_none());
-        // 长度错(8 字节,即使前 5 字节匹配也不接收,避免与状态帧混淆)
-        let bad_len = frame_with(
-            0x0100,
-            [0x00, 0xB5, 0x02, 0x12, 0x34, 0x00, 0x00, 0x00],
-            8,
-            true,
-        );
-        assert!(decode_version_reply(&bad_len).is_none());
     }
 
     #[test]

@@ -99,7 +99,7 @@ fn handle_capabilities(ctx: &SessionCtx) -> Result<Value, String> {
                 "modes": ["mit", "pos_vel", "pos_vel_acc", "vel", "torque"],
                 "ops_unified": ["scan", "disable", "stop", "state_once", "status", "verify"],
                 "ops_vendor_native": [
-                    "read", "pos_classic", "version", "read_register",
+                    "read", "pos_classic", "read_register",
                     "dq_voltage", "dq_current", "brake", "run_mode",
                     "write_register", "periodic_report",
                     "set_zero_position", "store_parameters",

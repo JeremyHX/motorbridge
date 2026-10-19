@@ -65,7 +65,7 @@ If a vendor does not support one of these four baseline modes, gateway returns `
 | robstride | native MIT | maps to native Position (`run_mode=1` + `vel_max` + `loc_ref`) | native Velocity mode | unsupported | `vel` maps to vendor velocity target; `pos_vel` maps to vendor Position | native param read/write via `robstride_*` |
 | hexfellow | native MIT | native POS_VEL | unsupported | unsupported | `mit` supports `kp/kd/tau`; no standalone `vel` | CAN-FD path |
 | myactuator | unsupported | Position setpoint flow | native velocity setpoint | unsupported | `pos_vel` via position setpoint; `vel` in baseline set | native strengths: current/position/version/mode-query |
-| hightorque | native MIT (v2.0.0 bit-packed frame) | native POS_VEL (`0x07 0x35`) | native velocity frame | unsupported | all commands go through `motor_vendor_hightorque` (single implementation); feedback is physical units with model torque-coeff correction | additionally `pos_vel_acc` (trapezoid `07 2d`) and `torque` (`05 13`, physical Nm) modes plus `pos_classic`/`dq_voltage`/`dq_current`/`brake`/`run_mode`/`write_register`/`periodic_report`/`version`/`read_register` vendor ops; `enable` is a semantic no-op (plan B, 2026-10-08: succeeds without sending any frame) |
+| hightorque | native MIT (v2.0.0 bit-packed frame) | native POS_VEL (`0x07 0x35`) | native velocity frame | unsupported | all commands go through `motor_vendor_hightorque` (single implementation); feedback is physical units with model torque-coeff correction | additionally `pos_vel_acc` (trapezoid `07 2d`) and `torque` (`05 13`, physical Nm) modes plus `pos_classic`/`dq_voltage`/`dq_current`/`brake`/`run_mode`/`write_register`/`periodic_report`/`read_register` vendor ops; `enable` is a semantic no-op (plan B, 2026-10-08: succeeds without sending any frame) |
 
 ### Unified Core Ops Support Matrix
 
@@ -129,7 +129,7 @@ Recommended: client calls `{"op":"capabilities"}` on connect and adapts UI/flows
         "transports": ["auto", "socketcan"],
         "modes": ["mit", "pos_vel", "pos_vel_acc", "vel", "torque"],
         "ops_unified": ["scan", "disable", "stop", "state_once", "status", "verify"],
-        "ops_vendor_native": ["read", "pos_classic", "version", "read_register", "dq_voltage", "dq_current", "brake", "run_mode", "write_register", "periodic_report", "set_zero_position", "store_parameters"]
+        "ops_vendor_native": ["read", "pos_classic", "read_register", "dq_voltage", "dq_current", "brake", "run_mode", "write_register", "periodic_report", "set_zero_position", "store_parameters"]
       }
     },
     "unsupported_behavior": "return {ok:false,error:'unsupported ...'}"

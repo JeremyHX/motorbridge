@@ -276,7 +276,7 @@ pub fn run_hightorque(
         .map_err(|e| format!("add motor failed: {e}"))?;
 
     let mut send_count = loop_n.max(1);
-    if matches!(mode.as_str(), "ping" | "read" | "version" | "read-reg" | "write-reg") {
+    if matches!(mode.as_str(), "ping" | "read" | "read-reg" | "write-reg") {
         send_count = 1;
     }
 
@@ -422,18 +422,6 @@ pub fn run_hightorque(
                     .send_cmd_pos_vel_acc(pos, vlim, acc)
                     .map_err(|e| e.to_string())?;
             }
-            "version" => {
-                // 固件版本查询 15 B5 02:vendor request_firmware_version,
-                // 版本号按半位解包(major.minor.patch)。
-                let timeout_ms = get_u64(args, "timeout-ms", 500)?;
-                let fw = motor
-                    .request_firmware_version(Duration::from_millis(timeout_ms))
-                    .map_err(|e| e.to_string())?;
-                println!(
-                    "[ok] mode=version id={} firmware={}.{}.{}",
-                    motor_id, fw.major, fw.minor, fw.patch
-                );
-            }
             "read-reg" => {
                 // 通用寄存器读 17 族:vendor read_registers。返回 raw 值,
                 // 物理量标度换算按寄存器功能表由调用方完成;名称/类型
@@ -541,7 +529,7 @@ pub fn run_hightorque(
             }
             _ => {
                 return Err(format!(
-                "unknown hightorque mode: {}. expected ping|scan|read|mit|pos|vel|tqe|volt|cur|set-mode|pos-vel-tqe|pos-vel-acc|version|read-reg|write-reg|stop|brake|rezero|conf-write|periodic-report",
+                "unknown hightorque mode: {}. expected ping|scan|read|mit|pos|vel|tqe|volt|cur|set-mode|pos-vel-tqe|pos-vel-acc|read-reg|write-reg|stop|brake|rezero|conf-write|periodic-report",
                 mode
             )
             .into());

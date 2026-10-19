@@ -42,7 +42,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "                    hightorque_send_dq_current / hightorque_brake /\n"
             "                    hightorque_set_run_mode / hightorque_write_register /\n"
             "                    hightorque_set_periodic_report /\n"
-            "                    hightorque_request_firmware_version / hightorque_get_register\n"
+            "                    hightorque_get_register\n"
             "                    (SDK-only; CLI exposes mit/pos-vel/vel)\n"
             "  hexfellow mit:    --pos --vel --kp --kd --tau\n"
             "  hexfellow pos-vel: --pos --vlim\n"

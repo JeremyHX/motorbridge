@@ -68,7 +68,7 @@ WS API 主链路已实现。
 | robstride | 原生 MIT | 映射到原生 Position（`run_mode=1` + `vel_max` + `loc_ref`） | 原生 Velocity 模式 | 不支持 | `vel` 映射到 vendor velocity target；`pos_vel` 映射到 vendor Position | 参数读写走 `robstride_*` |
 | hexfellow | 原生 MIT | 原生 POS_VEL | 不支持 | 不支持 | `mit` 支持 `kp/kd/tau`，无独立 `vel` | CAN-FD 链路 |
 | myactuator | 不支持 | Position 设定流程 | 原生速度设定 | 不支持 | `pos_vel` 通过 position setpoint 实现；基线里 `vel` 可用 | 强项是 current/position/version/mode-query |
-| hightorque | 原生 MIT（v2.0.0 位打包帧） | 原生 POS_VEL（`0x07 0x35` 协同） | 原生速度帧 | 不支持 | 全部命令经 `motor_vendor_hightorque`（唯一实现）；回帧为物理量并带型号力矩系数补偿 | 另有 `pos_vel_acc`（梯形 `07 2d`）与 `torque`（`05 13`，物理量 Nm）模式，以及 `pos_classic`/`dq_voltage`/`dq_current`/`brake`/`run_mode`/`write_register`/`periodic_report`/`version`/`read_register` 专属 op；`enable` 为语义空操作（方案 B，2026-10-08，不发帧直接成功） |
+| hightorque | 原生 MIT（v2.0.0 位打包帧） | 原生 POS_VEL（`0x07 0x35` 协同） | 原生速度帧 | 不支持 | 全部命令经 `motor_vendor_hightorque`（唯一实现）；回帧为物理量并带型号力矩系数补偿 | 另有 `pos_vel_acc`（梯形 `07 2d`）与 `torque`（`05 13`，物理量 Nm）模式，以及 `pos_classic`/`dq_voltage`/`dq_current`/`brake`/`run_mode`/`write_register`/`periodic_report`/`read_register` 专属 op；`enable` 为语义空操作（方案 B，2026-10-08，不发帧直接成功） |
 
 ### 统一核心操作支持矩阵
 
@@ -132,7 +132,7 @@ WS API 主链路已实现。
         "transports": ["auto", "socketcan"],
         "modes": ["mit", "pos_vel", "pos_vel_acc", "vel", "torque"],
         "ops_unified": ["scan", "disable", "stop", "state_once", "status", "verify"],
-        "ops_vendor_native": ["read", "pos_classic", "version", "read_register", "dq_voltage", "dq_current", "brake", "run_mode", "write_register", "periodic_report", "set_zero_position", "store_parameters"]
+        "ops_vendor_native": ["read", "pos_classic", "read_register", "dq_voltage", "dq_current", "brake", "run_mode", "write_register", "periodic_report", "set_zero_position", "store_parameters"]
       }
     },
     "unsupported_behavior": "return {ok:false,error:'unsupported ...'}"

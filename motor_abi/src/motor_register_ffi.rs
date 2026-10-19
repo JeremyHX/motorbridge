@@ -297,38 +297,6 @@ pub extern "C" fn motor_handle_robstride_set_active_report(
     ffi_rc(rc)
 }
 
-/// HighTorque 固件版本查询(`15 B5 02`,阻塞等待回复,超时返回 -1)。
-/// 版本三元组经 out 指针写出(major/minor/patch,协议 `decode_version_reply`)。
-/// 仅 HighTorque 电机支持。
-#[unsafe(no_mangle)]
-pub extern "C" fn motor_handle_hightorque_request_firmware_version(
-    motor: *mut MotorHandle,
-    timeout_ms: u32,
-    out_major: *mut u8,
-    out_minor: *mut u8,
-    out_patch: *mut u8,
-) -> i32 {
-    if motor.is_null() || out_major.is_null() || out_minor.is_null() || out_patch.is_null() {
-        set_last_error("motor or out version pointers are null");
-        return -1;
-    }
-    let motor = lock_motor_inner!(motor, "motor is null");
-    let rc = match &*motor {
-        MotorHandleInner::Hightorque(m) => m
-            .request_firmware_version(Duration::from_millis(timeout_ms as u64))
-            .map(|v| {
-                unsafe {
-                    *out_major = v.major;
-                    *out_minor = v.minor;
-                    *out_patch = v.patch;
-                };
-            })
-            .map_err(|e| e.to_string()),
-        _ => Err("hightorque_request_firmware_version requires a HighTorque motor".to_string()),
-    };
-    ffi_rc(rc)
-}
-
 /// HighTorque 通用寄存器读取(协议 §1.3 `17 <cmd> <addr>` 族)。
 ///
 /// - `addr`: 寄存器地址(表1,0x00–0x45)
@@ -496,51 +464,6 @@ mod tests {
             is_extended: ext,
             is_rx: true,
         }
-    }
-
-    /// F3:固件版本查询,`15 B5 02` 查询帧 + 版本回复解码(major/minor/patch)。
-    #[test]
-    fn hightorque_request_firmware_version_decodes_reply() {
-        let (bus, mut handle) = ht_handle();
-        bus.push_rx(rx_frame(
-            0x0100,
-            [0x00, 0xB5, 0x02, 0x12, 0x34, 0, 0, 0],
-            5,
-            true,
-        ));
-        let (mut major, mut minor, mut patch) = (0u8, 0u8, 0u8);
-        let rc = motor_handle_hightorque_request_firmware_version(
-            (&mut handle) as *mut MotorHandle,
-            200,
-            (&mut major) as *mut u8,
-            (&mut minor) as *mut u8,
-            (&mut patch) as *mut u8,
-        );
-        assert_eq!(rc, 0);
-        // data[3]=0x12, data[4]=0x34 → major=3, minor=5, patch=2(protocol 测试同款)
-        assert_eq!((major, minor, patch), (3, 5, 2));
-        // 查询帧本身:扩展 29 位 0x8000|id,载荷 15 B5 02
-        let sent = bus.sent.lock().expect("sent");
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].arbitration_id, 0x8001);
-        assert!(sent[0].is_extended);
-        assert_eq!(&sent[0].data[..3], &[0x15, 0xB5, 0x02]);
-        assert_eq!(sent[0].dlc, 3);
-    }
-
-    /// F3:超时无回复返回 -1 并写 last_error。
-    #[test]
-    fn hightorque_request_firmware_version_times_out() {
-        let (_bus, mut handle) = ht_handle();
-        let (mut major, mut minor, mut patch) = (0u8, 0u8, 0u8);
-        let rc = motor_handle_hightorque_request_firmware_version(
-            (&mut handle) as *mut MotorHandle,
-            20,
-            (&mut major) as *mut u8,
-            (&mut minor) as *mut u8,
-            (&mut patch) as *mut u8,
-        );
-        assert_eq!(rc, -1);
     }
 
     /// F4:通用寄存器读,Int16 单地址(count=1)。回复 0x25(cmd=reply nibble|

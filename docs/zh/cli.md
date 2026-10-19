@@ -118,7 +118,6 @@ cargo run -p motor_cli --release -- \
 - `volt`（DQ 电压模式 `01 00 08 05 1B`）：`--volt <V>`（0.1 V/LSB，协议只定义 Q 分量）
 - `cur`（DQ 电流模式 `01 00 09 05 1C`）：`--cur <A>`（0.1 A/LSB）
 - `set-mode`（运行模式切换 `01 00 <mode>`）：`--run-mode <0-17>`（表2；0=停止并清错，8=DQ 电压，9=DQ 电流，10=位置，15=刹车）
-- `version`（固件版本 `15 B5 02`，打印 `firmware=major.minor.patch`）
 - `read-reg`（通用寄存器读 `17` 族）：`--addr <hex|dec>` 必填、`--count`（1-3，默认 1）、`--ty`（`0|i8`/`1|i16`/`2|i32`/`3|f32`，缺省回落寄存器表，无则必填）；打印 raw 值与寄存器名
 - `write-reg`（通用寄存器写 `05 <addr> <val16>`）：`--addr` 必填、`--value <int16>`、`--config`（0/1，1=配置类走扩展帧，缺省 0 走控制通道）
 - `periodic-report`（周期上报 `05 B4 02 <t_ms>`）：`--period-ms`（≥1 开启电机主动状态流，0 停止；`timed-read` 为旧名别名）
@@ -170,9 +169,7 @@ cargo run -p motor_cli --release -- \
 ```
 
 ```bash
-# 查询固件版本 / 读 3 个连续寄存器（位置/速度/转矩，int16）
-cargo run -p motor_cli --release -- \
-  --vendor hightorque --channel can0 --motor-id 1 --mode version
+# 读 3 个连续寄存器（位置/速度/转矩，int16）
 cargo run -p motor_cli --release -- \
   --vendor hightorque --channel can0 --motor-id 1 \
   --mode read-reg --addr 0x01 --count 3 --ty i16

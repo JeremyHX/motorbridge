@@ -232,21 +232,6 @@ class Motor:
             "hightorque_send_pos_classic",
         )
 
-    def hightorque_request_firmware_version(self, timeout_ms: int = 500) -> tuple[int, int, int]:
-        """HighTorque 固件版本查询(15 B5 02, 阻塞等待)。
-        返回 (major, minor, patch)。仅 HighTorque。"""
-        major = c_uint8(0)
-        minor = c_uint8(0)
-        patch = c_uint8(0)
-        _ok(
-            self._abi.lib.motor_handle_hightorque_request_firmware_version(
-                self._require_open(), timeout_ms,
-                ctypes.byref(major), ctypes.byref(minor), ctypes.byref(patch),
-            ),
-            "hightorque_request_firmware_version",
-        )
-        return int(major.value), int(minor.value), int(patch.value)
-
     def hightorque_get_register(
         self, addr: int, ty: int = 1, count: int = 1, timeout_ms: int = 500
     ) -> list[float]:

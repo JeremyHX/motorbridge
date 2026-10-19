@@ -197,10 +197,6 @@ class Abi:
         lib.motor_handle_hightorque_send_pos_vel_acc.restype = c_int32
         lib.motor_handle_hightorque_send_pos_classic.argtypes = [c_void_p, c_float, c_float]
         lib.motor_handle_hightorque_send_pos_classic.restype = c_int32
-        lib.motor_handle_hightorque_request_firmware_version.argtypes = [
-            c_void_p, c_uint32, POINTER(c_uint8), POINTER(c_uint8), POINTER(c_uint8)
-        ]
-        lib.motor_handle_hightorque_request_firmware_version.restype = c_int32
         lib.motor_handle_hightorque_get_register.argtypes = [
             c_void_p, c_uint8, c_uint8, c_uint8, c_uint32, POINTER(c_float)
         ]

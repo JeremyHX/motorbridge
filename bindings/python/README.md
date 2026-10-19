@@ -177,7 +177,6 @@ HighTorque SDK extensions (beyond the unified modes, motor-handle methods):
 - `hightorque_set_run_mode(mode)` — run-mode switch (`01 00 <mode>`, register 0x000), mode 0-17 per table 2 (0 = stop & clear error); sends a real frame unlike `ensure_mode`.
 - `hightorque_write_register(addr, value, config_class=False)` — generic register write (`05 <addr> <val16>`); `config_class=True` sends via the extended `0x8000|id` frame.
 - `hightorque_set_periodic_report(period_ms)` — periodic status report (`05 B4 02`): `>=1` enables the motor-initiated `27 01` status stream, `0` stops it.
-- `hightorque_request_firmware_version(timeout_ms=500) -> (major, minor, patch)` — firmware version query (`15 B5 02`).
 - `hightorque_get_register(addr, ty=1, count=1, timeout_ms=500) -> list[float]` — generic register read (`17` family); `ty`: 0=Int8 / 1=Int16 / 2=Int32 / 3=Float, `count` 1-3; returns raw values.
 - `get_state()` now also returns `fault_code` (HighTorque table-3 fault code, 0 = no fault; other vendors always 0).
 

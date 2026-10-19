@@ -55,11 +55,23 @@ fn handle_pos(v: &Value, ctx: &mut SessionCtx) -> Result<Value, String> {
 
 /// HighTorque 普通位置模式(`07 07`):目标位置 + 可选力矩上限。
 /// `tqe` 缺省表示力矩无限制(0x8000 哨兵);力矩按型号自适应补偿。
-/// 一次性命令,不进入 continuous 活动指令(与 myactuator "pos" 同型)。
+/// 字段存在但非数字时报错拒绝(评审 A2:限幅是安全字段,类型错误
+/// 不能静默降级为"无限制")。一次性命令,不进入 continuous 活动指令
+/// (与 myactuator "pos" 同型)。
 fn handle_pos_classic(v: &Value, ctx: &mut SessionCtx) -> Result<Value, String> {
     ctx.ensure_connected()?;
     let pos = as_f32(v, "pos", 0.0);
-    let tqe = v.get("tqe").and_then(Value::as_f64).map(|x| x as f32);
+    // 区分"字段缺席 = 故意不限力矩"与"字段存在但类型错 = 客户端笔误":
+    // 后者报错,避免 "tqe":"1.5" 被静默编码为 0x8000 无限制力矩。
+    let tqe = match v.get("tqe") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_f64()
+                .map(|x| x as f32)
+                .ok_or_else(|| "pos_classic 'tqe' must be a number (Nm)".to_string())?,
+        ),
+    };
     match ctx.motor.as_ref() {
         Some(MotorHandle::Hightorque(m)) => {
             m.send_cmd_pos_classic(pos, tqe)
@@ -82,20 +94,7 @@ fn handle_version(v: &Value, ctx: &mut SessionCtx) -> Result<Value, String> {
                 .map_err(|e| e.to_string())?;
             Ok(json!({"version": version}))
         }
-        // 高擎固件版本(15 B5 02):vendor 原语收敛后接入,解除
-        // "version 为 myactuator-only" 的限制。
-        Some(MotorHandle::Hightorque(m)) => {
-            let fw = m
-                .request_firmware_version(Duration::from_millis(timeout_ms))
-                .map_err(|e| e.to_string())?;
-            Ok(json!({
-                "vendor": "hightorque",
-                "major": fw.major,
-                "minor": fw.minor,
-                "patch": fw.patch,
-            }))
-        }
-        Some(_) => Err("version is supported for myactuator and hightorque only".to_string()),
+        Some(_) => Err("version is supported for myactuator only".to_string()),
         None => Err("motor not connected".to_string()),
     }
 }
@@ -338,5 +337,79 @@ fn handle_periodic_report(v: &Value, ctx: &mut SessionCtx) -> Result<Value, Stri
         }
         Some(_) => Err("periodic_report is supported for hightorque only".to_string()),
         None => Err("motor not connected".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Target, Transport, Vendor};
+    use motor_core::bus::CanBus;
+    use motor_core::test_support::MockBus;
+    use motor_vendor_hightorque::HightorqueController;
+    use std::sync::Arc;
+
+    fn ht_ctx() -> (Arc<MockBus>, SessionCtx) {
+        let bus: Arc<MockBus> = Arc::new(MockBus::new());
+        let ctrl = HightorqueController::new(bus.clone() as Arc<dyn CanBus>);
+        let motor = ctrl.add_motor(1, 1, "hightorque").expect("add motor");
+        let target = Target {
+            vendor: Vendor::Hightorque,
+            transport: Transport::SocketCan,
+            channel: "mock".to_string(),
+            serial_port: String::new(),
+            serial_baud: 0,
+            dm_device_type: String::new(),
+            dm_channel: String::new(),
+            model: "hightorque".to_string(),
+            motor_id: 1,
+            feedback_id: 1,
+        };
+        (
+            bus,
+            SessionCtx {
+                target,
+                controller: Some(ControllerHandle::Hightorque(ctrl)),
+                motor: Some(MotorHandle::Hightorque(motor)),
+                active: None,
+            },
+        )
+    }
+
+    /// 评审 A2 回归:pos_classic 的 tqe 传非数字 JSON 类型(字符串/布尔/
+    /// null)时报错拒绝,且报错发生在任何控制帧发出之前——限幅是安全
+    /// 字段,类型错不得静默降级为 0x8000 无限制力矩。
+    #[test]
+    fn pos_classic_rejects_non_numeric_tqe_without_sending() {
+        for bad in [json!("1.5"), json!(true), json!(null), json!([1.5])] {
+            let (bus, mut ctx) = ht_ctx();
+            let r = handle_pos_classic(&json!({ "pos": 1.0, "tqe": bad }), &mut ctx);
+            let err = r.expect_err("non-numeric tqe must be rejected");
+            assert!(err.contains("tqe"), "error should name the field: {err}");
+            let sent = bus.sent.lock().expect("sent");
+            assert!(
+                sent.is_empty(),
+                "no control frame may be sent on type error, got {sent:?}"
+            );
+        }
+    }
+
+    /// 字段缺席 = 故意不限力矩(None);数字正常解析。两种合法形态
+    /// 都照常下发 07 07 帧。
+    #[test]
+    fn pos_classic_accepts_absent_and_numeric_tqe() {
+        let (bus, mut ctx) = ht_ctx();
+        let r = handle_pos_classic(&json!({ "pos": 1.0 }), &mut ctx).expect("absent tqe ok");
+        assert_eq!(r["tqe"], serde_json::Value::Null);
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 1, "absent tqe still sends the 07 07 frame");
+
+        let (_bus, mut ctx) = ht_ctx();
+        let r = handle_pos_classic(
+            &json!({ "pos": 1.0, "tqe": 1.5 }),
+            &mut ctx,
+        )
+        .expect("numeric tqe ok");
+        assert_eq!(r["tqe"], json!(1.5));
     }
 }

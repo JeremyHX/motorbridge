@@ -1,9 +1,8 @@
 use crate::protocol::{
-    amps_to_raw, decode_feedback, decode_read_reply, decode_register_reply, decode_version_reply,
-    encode_mit_frame, encode_read, is_setting_ack, rad_to_pos_raw, radps2_to_acc_raw,
-    radps_to_vel_raw, reply_motor_id, tqe_adjust_to_raw, volts_to_raw, FirmwareVersion,
-    HightorqueFeedbackState, MotorModel, ReadCmd, RegisterValue, RunMode, TorqueCoeff,
-    MIT_ID_PREFIX,
+    amps_to_raw, decode_feedback, decode_read_reply, decode_register_reply, encode_mit_frame,
+    encode_read, is_setting_ack, rad_to_pos_raw, radps2_to_acc_raw, radps_to_vel_raw,
+    reply_motor_id, tqe_adjust_to_raw, volts_to_raw, HightorqueFeedbackState, MotorModel, ReadCmd,
+    RegisterValue, RunMode, TorqueCoeff, MIT_ID_PREFIX,
 };
 use motor_core::bus::{CanBus, CanFrame};
 use motor_core::device::MotorDevice;
@@ -334,28 +333,6 @@ impl HightorqueMotor {
         )))
     }
 
-    /// 查询固件版本(`0x15 0xB5 0x02`,参考固件 `send_read_motor_version`)。
-    /// 回复 5 字节,签名 `data[1]==0xB5 && data[2]==0x02`,版本号按半位解包。
-    pub fn request_firmware_version(&self, timeout: Duration) -> Result<FirmwareVersion> {
-        self.send_query(&[0x15, 0xB5, 0x02], 3)?;
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if let Some(frame) = self.bus.recv(left.min(Duration::from_millis(20)))? {
-                if reply_motor_id(&frame) != Some(self.motor_id as u8) {
-                    continue;
-                }
-                if let Some(v) = decode_version_reply(&frame) {
-                    return Ok(v);
-                }
-            }
-        }
-        Err(MotorError::Timeout(format!(
-            "HighTorque firmware version timeout on motor id {}",
-            self.motor_id
-        )))
-    }
-
     pub fn request_motor_feedback(&self, timeout: Duration) -> Result<()> {
         self.send_query(&[0x17, 0x01, 0, 0, 0, 0, 0, 0], 8)?;
         self.wait_status(timeout)
@@ -478,7 +455,7 @@ impl HightorqueMotor {
         }
     }
 
-    /// 查询/配置类命令(read/rezero/store/conf_write/version):**扩展 29 位帧**,
+    /// 查询/配置类命令(read/rezero/store/conf_write):**扩展 29 位帧**,
     /// ID = `0x8000 | motor_id`,置回复总开关 bit15(参考固件这些路径均
     /// `can_send(hfdcanx, 0x8000 | id, ...)`,见 P2-12/P2-13)。
     fn send_query(&self, payload: &[u8], dlc: u8) -> Result<()> {
@@ -570,13 +547,12 @@ impl MotorDevice for HightorqueMotor {
             return false;
         }
         // 8 字节:寄存器读回复(0x27...)或控制命令附带的状态反馈(byte0=mode)。
-        // 7 字节:设置 ACK(0x41...)。5 字节:固件版本回复(0xB5 0x02)。
-        // 其余长度:可解析的寄存器读回复(int16 count1=4 字节、float=6 字节
-        // 等)——入寄存器缓存;不匹配则不归被动反馈,帧被丢弃。
+        // 7 字节:设置 ACK(0x41...)。其余长度:可解析的寄存器读回复
+        // (int16 count1=4 字节、float=6 字节等)——入寄存器缓存;
+        // 不匹配则不归被动反馈,帧被丢弃。
         match frame.dlc {
             8 => true,
             7 => is_setting_ack(frame),
-            5 => decode_version_reply(frame).is_some(),
             _ => decode_register_reply(&frame.data[..frame.dlc as usize]).is_some(),
         }
     }
@@ -631,16 +607,6 @@ mod tests {
             arbitration_id: u32::from(id) << 8,
             data: [0x41, 0x01, 0x04, 0x4F, 0x4B, 0x0D, 0x0A, 0],
             dlc: 7,
-            is_extended: true,
-            is_rx: true,
-        }
-    }
-
-    fn version_frame(id: u16, b3: u8, b4: u8) -> CanFrame {
-        CanFrame {
-            arbitration_id: u32::from(id) << 8,
-            data: [0x15, 0xB5, 0x02, b3, b4, 0, 0, 0],
-            dlc: 5,
             is_extended: true,
             is_rx: true,
         }
@@ -777,31 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn request_firmware_version_decodes_reply() {
-        let (bus, motor) = make_motor(1);
-        // data[3]=0x12, data[4]=0x34 → major=3, minor=5, patch=2
-        bus.push_rx(version_frame(1, 0x12, 0x34));
-        let v = motor
-            .request_firmware_version(Duration::from_millis(200))
-            .expect("version");
-        assert_eq!(v.as_tuple(), (3, 5, 2));
-        let sent = bus.sent.lock().expect("sent frames");
-        assert_eq!(sent.len(), 1);
-        assert_eq!(&sent[0].data[..3], &[0x15, 0xB5, 0x02]);
-    }
-
-    #[test]
-    fn request_firmware_version_times_out_without_reply() {
-        let (_bus, motor) = make_motor(1);
-        let r = motor.request_firmware_version(Duration::from_millis(20));
-        assert!(
-            matches!(r, Err(MotorError::Timeout(_))),
-            "expected timeout, got {r:?}"
-        );
-    }
-
-    #[test]
-    fn accepts_frame_admits_status_register_ack_and_version() {
+    fn accepts_frame_admits_status_register_and_ack() {
         let (_bus, motor) = make_motor(1);
         // 8 字节状态帧
         let status = CanFrame {
@@ -814,8 +756,36 @@ mod tests {
         assert!(motor.accepts_frame(&status));
         // 7 字节 ACK
         assert!(motor.accepts_frame(&ack_frame(1)));
-        // 5 字节版本回复
-        assert!(motor.accepts_frame(&version_frame(1, 0x12, 0x34)));
+        // 5 字节 Int8×3 寄存器回复(cmd=reply|Int8|count3,2+3=5 字节):
+        // 版本查询删除后 5 字节帧改走寄存器解码分支——旧实现
+        // `5 => decode_version_reply` 会拒收该帧,导致 Background 模式下
+        // Int8×3 连续读的回复永不被认领(回归保护)。
+        let int8x3 = CanFrame {
+            arbitration_id: 0x0100,
+            data: [0x23, 0x22, 0x11, 0x22, 0x33, 0, 0, 0],
+            dlc: 5,
+            is_extended: true,
+            is_rx: true,
+        };
+        assert!(motor.accepts_frame(&int8x3));
+        motor.process_feedback_frame(int8x3).expect("process");
+        assert!(matches!(
+            motor.cached_register(0x22),
+            Some(crate::protocol::RegisterValue::I8(0x11))
+        ));
+        assert!(matches!(
+            motor.cached_register(0x23),
+            Some(crate::protocol::RegisterValue::I8(0x22))
+        ));
+        // 已删除的版本回复帧(15 B5 02..,dlc 5):首字节 0x15 非
+        // REPLY_NIBBLE,寄存器解码拒绝,被动路径仍不认领。
+        assert!(!motor.accepts_frame(&CanFrame {
+            arbitration_id: 0x0100,
+            data: [0x15, 0xB5, 0x02, 0x12, 0x34, 0, 0, 0],
+            dlc: 5,
+            is_extended: true,
+            is_rx: true,
+        }));
         // 其它电机的帧不接受
         assert!(!motor.accepts_frame(&ack_frame(2)));
         // 3 字节短帧不接受
@@ -924,12 +894,8 @@ mod tests {
                 Duration::from_millis(10),
             )
             .ok();
-        // 固件版本查询(0x15 0xB5 0x02)
-        motor
-            .request_firmware_version(Duration::from_millis(10))
-            .ok();
         let sent = bus.sent.lock().expect("sent");
-        assert!(sent.len() >= 2);
+        assert_eq!(sent.len(), 1);
         for f in sent.iter() {
             assert!(f.is_extended, "查询帧应为扩展 29 位");
             assert_eq!(f.arbitration_id, 0x8001, "查询帧 ID 应为 0x8000|motor_id");

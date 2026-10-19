@@ -319,7 +319,7 @@ HighTorque extras:\n\
   raw args: --raw-pos --raw-vel (--mode pos/vel/mit; torque is physical --tau Nm only)\n\
   --kp/--kd are packed into the v2.0.0 MIT bit-packed frame (firmware v4.6.0+, saturated beyond range)\n\
   --vlim <rad/s> --acc <rad/s^2> for --mode pos-vel-acc (trapezoid 07 2d)\n\
-  --timeout-ms <ms> for --mode version/read-reg (default 500)\n\
+  --timeout-ms <ms> for --mode read-reg (default 500)\n\
   --addr <hex|dec> --count <1-3> [--ty 0|i8 1|i16 2|i32 3|f32] for --mode read-reg\n\
   --addr <hex|dec> --value <int16> [--config 0|1] [--store 0|1] for --mode write-reg (config=1: extended frame; store=1: append conf-write 05 B3 flash save, default 0)\n\
   --run-mode <0-17> for --mode set-mode (protocol table 2; 0=stop+clear error, 8=DQ voltage, 9=DQ current, 10=position, 15=brake)\n\

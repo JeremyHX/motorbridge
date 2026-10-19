@@ -45,7 +45,7 @@ const ABI_CAPABILITIES: &str = r#"{
     "robstride": ["ping", "ping_host_id", "fault_report", "active_report", "device_id", "param_i8", "param_u8", "param_u16", "param_u32", "param_f32", "param_f32_host_id", "pos_vel_pp", "pos_vel_csp"],
     "myactuator": ["param_i8", "param_u8", "param_u16", "param_u32", "param_f32"],
     "hexfellow": ["socketcanfd", "mit", "pos_vel"],
-    "hightorque": ["mit", "vel", "pos_vel", "pos_vel_acc", "pos_classic", "torque", "dq_voltage", "dq_current", "brake", "set_run_mode", "write_register", "periodic_report", "request_register", "firmware_version", "get_register", "fault_code"]
+    "hightorque": ["mit", "vel", "pos_vel", "pos_vel_acc", "pos_classic", "torque", "dq_voltage", "dq_current", "brake", "set_run_mode", "write_register", "periodic_report", "request_register", "get_register", "fault_code"]
   }
 }"#;
 

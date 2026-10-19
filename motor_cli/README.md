@@ -557,7 +557,6 @@ motor_cli \
 - `set-mode` (run mode switch `01 00 <mode>`): `--run-mode <0-17>` (table 2; 0 = stop & clear error, 8 = DQ voltage, 9 = DQ current, 10 = position, 15 = brake).
 - `periodic-report` (periodic status report `05 B4 02 <t_ms>`): `--period-ms <ms>` (>=1 enables the motor-initiated `27 01` status stream, 0 stops; `timed-read` remains a legacy alias).
 - `pos-vel-acc` (trapezoid `07 2d`, firmware v4.6.0+): `--pos <rad> --vlim <rad/s> --acc <rad/s^2>`.
-- `version`: firmware version query (`15 B5 02`), prints `firmware=major.minor.patch`; tunable via `--timeout-ms` (default 500).
 - `read-reg`: generic register read (`17` family). `--addr <hex|dec>` required, `--count` (1-3, default 1), `--ty` (`0|i8`/`1|i16`/`2|i32`/`3|f32`) falls back to the vendor register table when omitted and is required when the table has no verified type. Prints raw values plus the register name; physical scaling per the register table is left to the caller.
 - `write-reg`: generic register write (`05 <addr> <val16>`). `--addr` required, `--value <int16>`, `--config` (0/1; 1 = config class via the extended `0x8000|id` frame, default 0 via the control channel). For the mode register 0x000 use `set-mode` instead. `--store` (0/1, default 0; 1 = append a `conf-write` `05 B3` flash save after the write, matching the Damiao/RobStride `write-param --store` convenience; the save is whole-config and a power cycle is advised).
 

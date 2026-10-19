@@ -118,7 +118,6 @@ Supported modes:
 - `volt` (DQ voltage mode `01 00 08 05 1B`): `--volt <V>` (0.1 V/LSB, Q component only per protocol)
 - `cur` (DQ current mode `01 00 09 05 1C`): `--cur <A>` (0.1 A/LSB)
 - `set-mode` (run mode switch `01 00 <mode>`): `--run-mode <0-17>` (table 2; 0 = stop & clear error, 8 = DQ voltage, 9 = DQ current, 10 = position, 15 = brake)
-- `version` (firmware query `15 B5 02`, prints `firmware=major.minor.patch`)
 - `read-reg` (generic register read, `17` family): `--addr <hex|dec>` required, `--count` (1-3, default 1), `--ty` (`0|i8`/`1|i16`/`2|i32`/`3|f32`, falls back to the vendor register table, required when unknown); prints raw values plus register name
 - `write-reg` (generic register write `05 <addr> <val16>`): `--addr` required, `--value <int16>`, `--config` (0/1; 1 = config class via extended frame, default 0 via the control channel)
 - `periodic-report` (periodic status report `05 B4 02 <t_ms>`): `--period-ms` (>=1 enables the motor-initiated status stream, 0 stops; `timed-read` remains a legacy alias)
@@ -170,9 +169,7 @@ cargo run -p motor_cli --release -- \
 ```
 
 ```bash
-# Firmware version / read 3 consecutive registers (pos/vel/torque, int16)
-cargo run -p motor_cli --release -- \
-  --vendor hightorque --channel can0 --motor-id 1 --mode version
+# Read 3 consecutive registers (pos/vel/torque, int16)
 cargo run -p motor_cli --release -- \
   --vendor hightorque --channel can0 --motor-id 1 \
   --mode read-reg --addr 0x01 --count 3 --ty i16
