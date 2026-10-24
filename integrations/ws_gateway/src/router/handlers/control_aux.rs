@@ -1,7 +1,7 @@
 use crate::commands::{as_f32, as_u64};
 use crate::model::{ControllerHandle, MotorHandle};
 use crate::session::SessionCtx;
-use motor_vendor_hightorque::{parameter_info, ReadCmd, RegisterType, RegisterValue};
+use motor_vendor_hightorque::{parameter_info, ReadCmd};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -118,20 +118,19 @@ fn handle_read(v: &Value, ctx: &mut SessionCtx) -> Result<Value, String> {
         (Some(ControllerHandle::Hightorque(_)), Some(MotorHandle::Hightorque(m))) => {
             // 收敛(2026-09-29):17 01 查询 + 等待 + 解码全部走 vendor,
             // 物理量带力矩系数补偿(旧手写路径力矩平移 ÷100)。
+            // 2026-10-21 起 vendor 阻塞式状态查询为 request_fresh_state
+            // (request_motor_feedback 归还 DM 非阻塞语义)。
             let timeout = Duration::from_millis(as_u64(v, "timeout_ms", 500));
-            m.request_motor_feedback(timeout).map_err(|e| e.to_string())?;
-            match m.latest_state() {
-                Some(s) => Ok(json!({
-                    "motor_id": s.can_id,
-                    "arbitration_id": s.arbitration_id,
-                    "pos": s.pos,
-                    "vel": s.vel,
-                    "torq": s.torq,
-                    "status_code": s.status_code,
-                    "fault_code": s.fault_code,
-                })),
-                None => Err("hightorque read timeout".to_string()),
-            }
+            let s = m.request_fresh_state(timeout).map_err(|e| e.to_string())?;
+            Ok(json!({
+                "motor_id": s.can_id,
+                "arbitration_id": s.arbitration_id,
+                "pos": s.pos,
+                "vel": s.vel,
+                "torq": s.torq,
+                "status_code": s.status_code,
+                "fault_code": s.fault_code,
+            }))
         }
         (Some(_), Some(_)) => Err("read op is reserved for hightorque".to_string()),
         _ => Err("motor not connected".to_string()),
@@ -139,52 +138,51 @@ fn handle_read(v: &Value, ctx: &mut SessionCtx) -> Result<Value, String> {
 }
 
 /// HighTorque 通用寄存器读取(17 族):从 `addr` 连续读 `count`(1-3) 个寄存器。
-/// 数据类型 `ty`(0=Int8/1=Int16/2=Int32/3=Float)优先取报文显式指定,
-/// 否则回落 `parameter_info` 已核实类型;两者皆无则报错要求显式指定
-/// (规范表未给出所有寄存器类型,盲读会按错误宽度解码)。
-/// 返回原始值(物理量标度换算按寄存器功能表由调用方完成)。
+/// 2026-10-22 起:读取**固定按 Int16**,报文 `ty` 字段已删除——显式携带
+/// `ty` 直接报错(不静默忽略,旧客户端迁移时能立刻发现);返回值为
+/// **换算后物理量**(按 vendor 寄存器表 quantity 归类:位置/速度→rad 族、
+/// 力矩套型号 k、电流/电压/温度/PWM/PID 按各自 scale;无换算关系的
+/// 寄存器 1:1)。每行的 name/unit 按该行自身地址查表(而非基础地址)。
 fn handle_read_register(v: &Value, ctx: &mut SessionCtx) -> Result<Value, String> {
     ctx.ensure_connected()?;
     match ctx.motor.as_ref() {
         Some(MotorHandle::Hightorque(m)) => {
-            let addr = v
+            // B2 修复(2026-10-21):越界地址(> 0xFF)直接拒绝,不再
+            // `as u8` 静默截断(addr=300 → 0x2C 读错寄存器)。
+            let addr_raw = v
                 .get("addr")
                 .and_then(Value::as_u64)
-                .ok_or_else(|| "read_register requires integer 'addr' (0x00-0x45)".to_string())?
-                as u8;
+                .ok_or_else(|| "read_register requires integer 'addr' (0x00-0xFF)".to_string())?;
+            let addr = u8::try_from(addr_raw).map_err(|_| {
+                format!("read_register 'addr' out of range 0x00-0xFF, got {addr_raw}")
+            })?;
+            if v.get("ty").is_some() {
+                return Err(
+                    "read_register 'ty' was removed: reads are fixed Int16 (2026-10-22)"
+                        .to_string(),
+                );
+            }
             let count = as_u64(v, "count", 1).clamp(1, 3) as u8;
-            let info = parameter_info(addr);
-            let ty = match v.get("ty").and_then(Value::as_u64) {
-                Some(0) => RegisterType::Int8,
-                Some(1) => RegisterType::Int16,
-                Some(2) => RegisterType::Int32,
-                Some(3) => RegisterType::Float,
-                Some(_) => {
-                    return Err(
-                        "read_register 'ty' must be 0=Int8/1=Int16/2=Int32/3=Float".to_string(),
-                    )
-                }
-                None => info
-                    .and_then(|i| i.ty)
-                    .ok_or_else(|| format!(
-                        "read_register: register 0x{addr:02X} data type unknown; pass 'ty' explicitly (0=Int8/1=Int16/2=Int32/3=Float)"
-                    ))?,
-            };
             let timeout = Duration::from_millis(as_u64(v, "timeout_ms", 500));
             let vals = m
-                .read_registers(&[ReadCmd { addr, ty, count }], timeout)
+                .read_registers(&[ReadCmd { addr, count }], timeout)
                 .map_err(|e| e.to_string())?;
+            // C2:每行按自身地址查名称/单位,而非基础地址。
             let registers: Vec<Value> = vals
                 .iter()
-                .map(|(a, rv)| {
+                .map(|(a, val)| {
+                    let (name, unit) = match parameter_info(*a) {
+                        Some(i) => (
+                            json!(i.name),
+                            json!(i.quantity.map(|q| q.unit_label()).unwrap_or("")),
+                        ),
+                        None => (json!("unknown"), json!("")),
+                    };
                     json!({
                         "addr": a,
-                        "value": match rv {
-                            RegisterValue::I8(x) => json!(x),
-                            RegisterValue::I16(x) => json!(x),
-                            RegisterValue::I32(x) => json!(x),
-                            RegisterValue::F32(x) => json!(x),
-                        },
+                        "name": name,
+                        "unit": unit,
+                        "value": val,
                     })
                 })
                 .collect();
@@ -193,22 +191,11 @@ fn handle_read_register(v: &Value, ctx: &mut SessionCtx) -> Result<Value, String
                 "vendor": "hightorque",
                 "addr": addr,
                 "count": count,
-                "name": info.map(|i| i.name),
-                "type": hightorque_register_type_name(ty),
                 "registers": registers,
             }))
         }
         Some(_) => Err("read_register is supported for hightorque only".to_string()),
         None => Err("motor not connected".to_string()),
-    }
-}
-
-fn hightorque_register_type_name(ty: RegisterType) -> &'static str {
-    match ty {
-        RegisterType::Int8 => "i8",
-        RegisterType::Int16 => "i16",
-        RegisterType::Int32 => "i32",
-        RegisterType::Float => "f32",
     }
 }
 
@@ -282,10 +269,14 @@ fn handle_run_mode(v: &Value, ctx: &mut SessionCtx) -> Result<Value, String> {
 /// 模式寄存器 0x000 不适用本 op,请用 run_mode。
 fn handle_write_register(v: &Value, ctx: &mut SessionCtx) -> Result<Value, String> {
     ctx.ensure_connected()?;
-    let addr = v
+    // B2 修复(2026-10-21):同 read 侧,越界地址拒绝,不再 as u8 截断。
+    let addr_raw = v
         .get("addr")
         .and_then(Value::as_u64)
-        .ok_or_else(|| "write_register requires integer 'addr'".to_string())? as u8;
+        .ok_or_else(|| "write_register requires integer 'addr' (0x00-0xFF)".to_string())?;
+    let addr = u8::try_from(addr_raw).map_err(|_| {
+        format!("write_register 'addr' out of range 0x00-0xFF, got {addr_raw}")
+    })?;
     let value = v
         .get("value")
         .and_then(Value::as_i64)
@@ -392,6 +383,90 @@ mod tests {
                 "no control frame may be sent on type error, got {sent:?}"
             );
         }
+    }
+
+    /// B2 回归(2026-10-21):寄存器地址越界(> 0xFF)直接拒绝,不再
+    /// `as u8` 静默截断。读、写两个 op 都验证(旧实现 addr=300 会截成
+    /// 0x2C 读/写错误寄存器),且拒绝发生在发帧之前(总线零帧)。
+    #[test]
+    fn read_write_register_reject_out_of_range_addr() {
+        let (bus, mut ctx) = ht_ctx();
+        let r = handle_read_register(&json!({ "addr": 300 }), &mut ctx);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("out of range"));
+
+        let r = handle_write_register(&json!({ "addr": 0x145, "value": 0 }), &mut ctx);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("out of range"));
+
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 0, "越界地址应在发帧前拒绝");
+
+        // 合法域边界:入参域上限 0xFF 现属表外(vendor 表校验拒绝,
+        // 见 read_write_register_rejects_unknown_table_addr);取表内
+        // 最高地址 0x45 作为"入参放行且发帧"的边界用例(会走到超时,
+        // 但帧已发出)
+        let (_bus, mut ctx) = ht_ctx();
+        let _ = handle_read_register(&json!({ "addr": 0x45, "timeout_ms": 10 }), &mut ctx);
+        let sent = _bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 1, "0x45 边界地址应正常发帧");
+        assert_eq!(sent[0].data[1], 0x45);
+    }
+
+    /// 2026-10-22 追补决策回归:缺号/表外地址拒绝访问——0x00-0xFF 入参
+    /// 域内的洞(缺号 0x0A)与 0x46-0xFF(表外 0x50/0xFF)一律报错且
+    /// 总线零发帧(vendor `ensure_known_span` 在发帧前拒绝);写路径同拒。
+    #[test]
+    fn read_write_register_rejects_unknown_table_addr() {
+        let (bus, mut ctx) = ht_ctx();
+        for addr in [0x0Au32, 0x50, 0xFF] {
+            let r = handle_read_register(&json!({ "addr": addr }), &mut ctx);
+            assert!(r.is_err(), "读 0x{addr:02X} 应被表校验拒绝");
+            assert!(
+                r.unwrap_err().contains("not in the parameter table"),
+                "报错应指明不在寄存器表"
+            );
+        }
+        let r = handle_write_register(&json!({ "addr": 0x0A, "value": 0 }), &mut ctx);
+        assert!(r.is_err(), "写缺号地址应被拒绝");
+        assert!(r.unwrap_err().contains("not in the parameter table"));
+        let r = handle_write_register(&json!({ "addr": 0x50, "value": 0 }), &mut ctx);
+        assert!(r.is_err(), "写表外地址应被拒绝");
+        assert!(r.unwrap_err().contains("not in the parameter table"));
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 0, "拒绝应发生在发帧之前");
+    }
+
+    /// 2026-10-22 决策回归:读取固定 Int16——0x0E(温度)读帧 cmd=0x15
+    /// (read|Int16|count1),扩展 0x8000|id、dlc 2。Mock 总线无回复,
+    /// 阻塞读超时属预期。
+    #[test]
+    fn read_register_defaults_unverified_addr_to_int16() {
+        let (bus, mut ctx) = ht_ctx();
+        let r = handle_read_register(&json!({ "addr": 14, "timeout_ms": 10 }), &mut ctx);
+        assert!(r.is_err(), "no reply on mock bus: timeout expected");
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 1, "exactly one register read frame");
+        assert_eq!(sent[0].arbitration_id, 0x8000 | 1);
+        assert!(sent[0].is_extended, "register reads go on 0x8000|id");
+        assert_eq!(sent[0].dlc, 2);
+        assert_eq!(
+            &sent[0].data[..2],
+            &[0x15, 0x0E],
+            "cmd 0x15 = read | Int16 | count 1"
+        );
+    }
+
+    /// 2026-10-22:报文显式携带 `ty` 直接报错(字段已删除,读取固定
+    /// Int16),不静默忽略;拒绝发生在发帧之前(总线零帧)。
+    #[test]
+    fn read_register_rejects_removed_ty_field() {
+        let (bus, mut ctx) = ht_ctx();
+        let r = handle_read_register(&json!({ "addr": 14, "ty": 1, "timeout_ms": 10 }), &mut ctx);
+        let err = r.expect_err("ty must be rejected");
+        assert!(err.contains("ty"), "error should name the field: {err}");
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 0, "ty 拒绝应在发帧前");
     }
 
     /// 字段缺席 = 故意不限力矩(None);数字正常解析。两种合法形态

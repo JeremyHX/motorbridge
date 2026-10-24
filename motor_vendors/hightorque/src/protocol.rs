@@ -125,6 +125,12 @@ pub(crate) fn reply_motor_id(frame: &CanFrame) -> Option<u8> {
     Some(((frame.arbitration_id >> 8) & 0x7F) as u8)
 }
 
+/// 解析 `0x27 0x01` 状态查询回复(参考固件 motor.c `len==8 &&
+/// p_data[0]==0x27` 分支): 只有 pos/vel/tqe 三个 int16(小端)。
+///
+/// 帧不含运行模式/故障码/温度,本函数以 0/0.0 填充这些字段——
+/// **这不是"值为 0"**。缓存侧(motor.rs `process_feedback_frame`)
+/// 按缺席字段不覆盖的规则合并,保留旧值(2026-10-23 决策)。
 pub(crate) fn decode_read_reply(
     frame: CanFrame,
     c: TorqueCoeff,
@@ -152,9 +158,16 @@ pub(crate) fn decode_read_reply(
     })
 }
 
-/// 解析控制命令附带的状态反馈帧(参考固件 `motor.c::motor_process_state`
+/// 解析 8 字节状态反馈帧(§3.2 格式,参考固件 `motor.c::motor_process_state`
 /// 的 `len==8 && p_data[0]!=0x27` 分支):byte0=mode(表2),byte1=fault(表3),
 /// byte2-7 = pos/vel/tqe int16(小端),标度与寄存器读回复一致。
+///
+/// ⚠ v2.0.0 真机上本帧无已知生产者(2026-10-09 candump:控制命令即使
+/// 置 bit15 也只回 DLC=0 空帧,见 can_protocol §1.2/§3.2 更正;周期
+/// 上报发的是 `27 01` 格式)——保留本路径因参考固件/官方 PDF 定义了
+/// 该格式,旧版或未知触发方式下仍可能出现。帧不含温度,t_mos/t_rotor
+/// 以 0.0 填充——缓存侧按缺席字段不覆盖的规则合并,保留旧值
+/// (2026-10-23 决策)。
 ///
 /// 寄存器读回复(0x27...)、设置 ACK(0x41,7 字节)、固件版本回复(5 字节)
 /// 均不满足此条件,会被返回 `None`,由各自的处理路径负责。
@@ -243,7 +256,7 @@ pub struct QuantityScale {
 }
 
 impl QuantityScale {
-    const fn scale(self, ty: DataType) -> f32 {
+    pub(crate) const fn scale(self, ty: DataType) -> f32 {
         match ty {
             DataType::Int8 => self.int8,
             DataType::Int16 => self.int16,
@@ -294,6 +307,27 @@ pub const PID_SCALE: QuantityScale = QuantityScale {
     int8: 1.0,
     int16: 10.0,
     int32: 1000.0,
+};
+/// 温度 raw scale(厂商寄存器单位表:int16 0.1 °C/LSB;2026-10-22 入表,
+/// 用户提供的换算关系按物理量一条给出,三列同值)。
+pub const TEMP_SCALE: QuantityScale = QuantityScale {
+    int8: 10.0,
+    int16: 10.0,
+    int32: 10.0,
+};
+/// 时间 raw scale(厂商寄存器单位表:int16 0.001 s/LSB;当前寄存器表
+/// 0x00-0x45 无时间寄存器,量程定义备用)。
+pub const TIME_SCALE: QuantityScale = QuantityScale {
+    int8: 1000.0,
+    int16: 1000.0,
+    int32: 1000.0,
+};
+/// PWM / rKp / rKd(0x23/0x24)raw scale(厂商寄存器单位表:归一化
+/// 1/32767,即 raw=32767 对应满量程 1.0)。
+pub const PWM_SCALE: QuantityScale = QuantityScale {
+    int8: 32767.0,
+    int16: 32767.0,
+    int32: 32767.0,
 };
 
 /// 单位→圈数(镜像 `conv_to_turns`)。
@@ -388,7 +422,9 @@ pub enum MotorModel {
     M5046_20,
     M5047_09,
     M5047_36,
-    /// HTDW-5036-02-CNE(50mm 行星关节, 减速比 36, Kt=0.54 Nm/A)。
+    /// HTDW-5036-02-CNE(50mm 行星关节, 减速比 36)。k=0.64 取自厂商
+    /// 寄存器单位表 k 表的 M5047_36 行(2026-10-20 决策);模组手册的扭矩
+    /// 常数 Kt=0.54 Nm/A 是另一概念, 不作补偿系数(固件表无此型号, 待实测校准)。
     M5036_36,
     M6056_36,
     M7256_35,
@@ -428,8 +464,10 @@ impl MotorModel {
                 k: 0.547_474,
                 d: 0.0,
             },
-            Self::M5047_36 => TorqueCoeff { k: 0.35, d: 0.0 },
-            Self::M5036_36 => TorqueCoeff { k: 0.54, d: 0.0 },
+            // 2026-10-20 决策: 取飞书单位表 0.64 为准;固件 motor_tqe_adj 为 0.35,
+            // 两版固件一致但按厂商文档优先原则弃用(分歧已上报厂商确认前以文档为准)。
+            Self::M5047_36 => TorqueCoeff { k: 0.64, d: 0.0 },
+            Self::M5036_36 => TorqueCoeff { k: 0.64, d: 0.0 },
             Self::M6056_36 => TorqueCoeff { k: 0.677, d: 0.0 },
             Self::M7256_35 => TorqueCoeff {
                 k: 0.676_524,
@@ -590,8 +628,9 @@ pub fn encode_mit_frame(
 // 多对 `(cmd, addr)` 可拼接,总长 ≤ 8 字节。回复镜像(cmd 高半字节=0010),
 // 每对形如 `(reply_cmd, start_addr, value0, value1, ...)`,地址连续递增。
 
-/// 寄存器数据类型(对应协议 cmd 的 `[3:2]` 两位)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 寄存器数据类型(对应协议 cmd 的 `[3:2]` 两位)。Hash/Eq 供
+/// motor.rs 寄存器缓存以 `(addr, ty)` 作键(A3)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegisterType {
     Int8 = 0b00,
     Int16 = 0b01,
@@ -622,6 +661,17 @@ impl RegisterType {
             Self::Int32 | Self::Float => 4,
         }
     }
+
+    /// 桥接到控制帧换算用的 `DataType`(寄存器读换算复用
+    /// `QuantityScale::scale`,后者按 `DataType` 取列)。
+    pub(crate) fn data_type(self) -> DataType {
+        match self {
+            Self::Int8 => DataType::Int8,
+            Self::Int16 => DataType::Int16,
+            Self::Int32 => DataType::Int32,
+            Self::Float => DataType::Float,
+        }
+    }
 }
 
 /// 读到的寄存器原始值。
@@ -643,13 +693,25 @@ impl RegisterValue {
             Self::F32(v) => v,
         }
     }
+
+    /// 值的数据类型(motor.rs 寄存器缓存 `(addr, ty)` 键的 `ty` 来源,
+    /// 回复帧 cmd 半字节编码的类型与解码变体一致)。
+    pub fn register_type(self) -> RegisterType {
+        match self {
+            Self::I8(_) => RegisterType::Int8,
+            Self::I16(_) => RegisterType::Int16,
+            Self::I32(_) => RegisterType::Int32,
+            Self::F32(_) => RegisterType::Float,
+        }
+    }
 }
 
-/// 一条读请求:从 `addr` 起连续读 `count` 个 `ty` 类型数据(count ∈ 1..=3)。
+/// 一条读请求:从 `addr` 起连续读 `count` 个数据(count ∈ 1..=3)。
+/// 2026-10-22 决策:读取**固定按 Int16**(`cmd [3:2]` 恒 01),调用方
+/// 不再指定数据类型。
 #[derive(Debug, Clone, Copy)]
 pub struct ReadCmd {
     pub addr: u8,
-    pub ty: RegisterType,
     pub count: u8,
 }
 
@@ -659,25 +721,22 @@ impl ReadCmd {
         if !(1..=3).contains(&count) {
             return None;
         }
-        // count 1/2/3 恰好等于 2 位编码 01/10/11
-        Some(0b0001_0000 | (self.ty.cmd_bits() << 2) | (count & 0b11))
+        // count 1/2/3 恰好等于 2 位编码 01/10/11;类型位恒 Int16(01)
+        Some(0b0001_0000 | (RegisterType::Int16.cmd_bits() << 2) | (count & 0b11))
     }
 }
 
 const REPLY_NIBBLE: u8 = 0b0010_0000;
 
-/// 将多对读请求拼成一帧 CAN 数据(≤ 8 字节)。超过 8 字节返回 `None`。
-pub(crate) fn encode_read(cmds: &[ReadCmd]) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(8);
-    for cmd in cmds {
-        let cb = cmd.cmd_byte()?;
-        out.push(cb);
-        out.push(cmd.addr);
-    }
-    if out.len() > 8 {
-        return None;
-    }
-    Some(out)
+/// 单条读请求的规范帧数据:恰好 2 字节 `(cmd, addr)`。
+///
+/// 2026-10-24 真机实测(can0,candump):固件只解析帧内**第一对**
+/// `(cmd, addr)`,尾随字节必须全零——多条读请求拼一帧(非零尾随
+/// 字节)会被电机**整帧静默丢弃**(零回帧,连 DLC=0 空帧都没有;
+/// dlc 2-8 的零尾随帧均正常受理)。故读请求一律一帧一对,连续地址
+/// 靠 cmd 的 count 位(1..=3)覆盖,非连续地址分多帧发。
+pub(crate) fn encode_read(cmd: ReadCmd) -> Option<[u8; 2]> {
+    Some([cmd.cmd_byte()?, cmd.addr])
 }
 
 /// 解析寄存器读回复。返回 `(addr, value)` 列表,地址按 count 连续递增。
@@ -791,55 +850,44 @@ mod tests {
 
     #[test]
     fn encode_read_single_int16_count3_matches_0x17_0x01() {
-        let cmds = [ReadCmd {
-            addr: 0x01,
-            ty: RegisterType::Int16,
-            count: 3,
-        }];
-        assert_eq!(encode_read(&cmds), Some(vec![0x17, 0x01]));
+        assert_eq!(
+            encode_read(ReadCmd {
+                addr: 0x01,
+                count: 3
+            }),
+            Some([0x17, 0x01])
+        );
+    }
+
+    /// 2026-10-22 决策:类型位恒 Int16 → count1 cmd=0x15、count2=0x16。
+    /// 2026-10-24 真机实测:一帧一对(固件丢弃非零尾随字节的多对拼帧)。
+    #[test]
+    fn encode_read_fixed_int16_cmd_bytes() {
+        assert_eq!(
+            encode_read(ReadCmd {
+                addr: 0x0E,
+                count: 1
+            }),
+            Some([0x15, 0x0E])
+        );
+        assert_eq!(
+            encode_read(ReadCmd {
+                addr: 0xFF,
+                count: 2
+            }),
+            Some([0x16, 0xFF])
+        );
     }
 
     #[test]
     fn encode_read_rejects_invalid_count() {
-        let cmds = [ReadCmd {
-            addr: 0x01,
-            ty: RegisterType::Int16,
-            count: 0,
-        }];
-        assert_eq!(encode_read(&cmds), None);
-    }
-
-    #[test]
-    fn encode_read_rejects_over_8_bytes() {
-        // 5 pairs = 10 bytes > 8
-        let cmds = [
-            ReadCmd {
+        assert_eq!(
+            encode_read(ReadCmd {
                 addr: 0x01,
-                ty: RegisterType::Int8,
-                count: 1,
-            },
-            ReadCmd {
-                addr: 0x02,
-                ty: RegisterType::Int8,
-                count: 1,
-            },
-            ReadCmd {
-                addr: 0x03,
-                ty: RegisterType::Int8,
-                count: 1,
-            },
-            ReadCmd {
-                addr: 0x04,
-                ty: RegisterType::Int8,
-                count: 1,
-            },
-            ReadCmd {
-                addr: 0x05,
-                ty: RegisterType::Int8,
-                count: 1,
-            },
-        ];
-        assert_eq!(encode_read(&cmds), None);
+                count: 0
+            }),
+            None
+        );
     }
 
     #[test]
@@ -1475,12 +1523,14 @@ mod tests {
         );
         assert_eq!(
             MotorModel::M5047_36.coeff(),
-            TorqueCoeff { k: 0.35, d: 0.0 }
+            // 2026-10-20 决策: 飞书 0.64 为准(固件两版均 0.35, 弃用)。
+            TorqueCoeff { k: 0.64, d: 0.0 }
         );
-        // HTDW-5036-02-CNE: Kt=0.54 Nm/A(电机端), 减速比 36。
+        // HTDW-5036-02-CNE: k=0.64(飞书单位表 M5047_36 行, 2026-10-20 决策;
+        // Kt=0.54 是模组扭矩常数, 与 k 不同概念, 未用作补偿系数)。
         assert_eq!(
             MotorModel::M5036_36.coeff(),
-            TorqueCoeff { k: 0.54, d: 0.0 }
+            TorqueCoeff { k: 0.64, d: 0.0 }
         );
         assert_eq!(
             MotorModel::M6056_36.coeff(),

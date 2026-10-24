@@ -266,9 +266,13 @@ pub extern "C" fn motor_handle_request_feedback(motor: *mut MotorHandle) -> i32 
             // robstride_ping() for connectivity checks, active report for streaming state,
             // or typed parameter reads for fresh position/velocity values.
             MotorHandleInner::Robstride(_) => Ok(()),
-            MotorHandleInner::Hightorque(m) => m
-                .request_motor_feedback(Duration::from_millis(500))
-                .map_err(|e| e.to_string()),
+            // 2026-10-23:对齐 DM 语义(与网关 request_feedback op、Damiao/
+            // MyActuator 分支一致)——发 17 01 查询帧(dlc 2)即返回,不等
+            // 回帧,回帧由后台收帧线程入缓存。原 request_fresh_state(500ms)
+            // 的阻塞语义(B1 时因 record_play.py 保留,该文件现已不存在)
+            // 由调用方自行组合:发同帧并阻塞等回可用
+            // motor_handle_hightorque_get_register(0x01, 3)。
+            MotorHandleInner::Hightorque(m) => m.request_motor_feedback().map_err(|e| e.to_string()),
         }
     })
 }
@@ -495,6 +499,33 @@ mod tests {
         let sent = bus.sent.lock().expect("sent");
         assert_eq!(sent.len(), 1);
         sent[0]
+    }
+
+    /// 2026-10-23 回归:request_feedback HT 分支**非阻塞**(DM 语义,
+    /// 对齐网关 request_feedback op)——Mock 总线无任何回复也必须 rc=0
+    /// 立即返回(旧 request_fresh_state(500ms) 实现在此会 Timeout →
+    /// rc=-1)。
+    /// 2026-10-24:发出**两帧** dlc 2 规范查询(`17 01` pos/vel/tq +
+    /// `16 0E` 温度/错误码;真机实测固件一帧一对,拼帧被静默丢弃)。
+    #[test]
+    fn hightorque_request_feedback_nonblocking() {
+        let (bus, mut handle) = ht_handle();
+        let start = std::time::Instant::now();
+        let rc = motor_handle_request_feedback((&mut handle) as *mut MotorHandle);
+        assert_eq!(rc, 0, "无回复也应立即成功(发完即走)");
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(100),
+            "不应阻塞等待回帧"
+        );
+        let sent = bus.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 2, "两帧:17 01 + 16 0E");
+        for f in sent.iter() {
+            assert_eq!(f.arbitration_id, 0x8000 | 1);
+            assert!(f.is_extended);
+            assert_eq!(f.dlc, 2);
+        }
+        assert_eq!(&sent[0].data[..2], &[0x17, 0x01], "读/Int16/3 个,从 0x01 起");
+        assert_eq!(&sent[1].data[..2], &[0x16, 0x0E], "读/Int16/2 个,从 0x0E 起");
     }
 
     /// F1:梯形控制走 `07 2d` 帧(control_reply 默认关 → 标准 11 位裸 id,

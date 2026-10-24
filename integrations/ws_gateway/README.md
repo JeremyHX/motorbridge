@@ -346,7 +346,7 @@ RobStride parameter stream frame:
 - Parameter streams: `param_stream` supports Damiao and RobStride; `damiao_param_stream` and `robstride_param_stream` are vendor-specific aliases.
 - RobStride-only ops: `robstride_ping`, `robstride_read_param`, `robstride_write_param`, `set_active_report`.
 - MyActuator-native ops: `current`, `pos`, `version`, `mode-query`.
-- HighTorque-native ops: `read`, `pos_classic` (classic position `07 07`, `tqe` optional = unlimited), `version` (firmware; MyActuator also supported), `read_register` (`17` family, `addr`/`count`/`ty`), `torque` (`05 13`, physical Nm, continuous-capable), `dq_voltage` / `dq_current` (combined mode+register frames), `brake` (run mode 15), `run_mode` (table-2 mode switch, real frame), `write_register` (`05 <addr> <val16>`), `periodic_report` (`05 B4`, motor-initiated status stream).
+- HighTorque-native ops: `read`, `pos_classic` (classic position `07 07`, `tqe` optional = unlimited), `version` (firmware; MyActuator also supported), `read_register` (`17` family, `addr`/`count`; fixed Int16 since 2026-10-22, returns converted physical values), `torque` (`05 13`, physical Nm, continuous-capable), `dq_voltage` / `dq_current` (combined mode+register frames), `brake` (run mode 15), `run_mode` (table-2 mode switch, real frame), `write_register` (`05 <addr> <val16>`), `periodic_report` (`05 B4`, motor-initiated status stream).
 - V2 plan can switch to binary frames while preserving operation semantics.
 
 ## Simple HMI (for quick testing)

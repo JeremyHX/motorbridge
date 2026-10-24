@@ -2,8 +2,7 @@ use crate::args::{get_f32, get_i16, get_str, get_u16_hex_or_dec, get_u64};
 use motor_core::bus::{open_transport, CanBus, Transport, TransportParams};
 use motor_core::CanFrame;
 use motor_vendor_hightorque::{
-    parameter_info, HightorqueController, HightorqueFeedbackState, ReadCmd, RegisterType,
-    RegisterValue,
+    parameter_info, HightorqueController, HightorqueFeedbackState, ReadCmd,
 };
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -140,42 +139,25 @@ fn tau_nm_from_args(args: &HashMap<String, String>) -> Result<Option<f32>, Strin
     Ok(None)
 }
 
-/// `--ty`(0|i8 / 1|i16 / 2|i32 / 3|f32);缺省回落寄存器表中已核实的类型,
-/// 两者皆无则报错(规范表未覆盖所有寄存器,盲读会按错误宽度解码)。
-fn reg_ty_from_args(
+/// 寄存器地址参数解析(B2 修复,2026-10-21):解析为 u8 并**拒绝越界**
+/// (> 0xFF)。旧实现 `get_u16_hex_or_dec(...)? as u8` 会把 0x145 静默
+/// 截成 0x45——读/写错误寄存器还把结果当请求的那个返回。合法域
+/// 0x00-0xFF(单个地址;连续读的地址推进回绕是 vendor 侧地址算术,
+/// 不在入参校验范围)。`mode_label` 用于报错定位(read-reg/write-reg)。
+fn reg_addr_from_args(
     args: &HashMap<String, String>,
-    addr: u8,
-) -> Result<RegisterType, Box<dyn std::error::Error>> {
-    if let Some(raw) = args.get("ty") {
-        let ty = match raw.trim() {
-            "0" | "i8" | "int8" => RegisterType::Int8,
-            "1" | "i16" | "int16" => RegisterType::Int16,
-            "2" | "i32" | "int32" => RegisterType::Int32,
-            "3" | "f32" | "float" => RegisterType::Float,
-            _ => {
-                return Err(format!(
-                    "invalid --ty '{raw}' (expected 0|i8, 1|i16, 2|i32, 3|f32)"
-                )
-                .into())
-            }
-        };
-        return Ok(ty);
-    }
-    match parameter_info(addr).and_then(|i| i.ty) {
-        Some(ty) => Ok(ty),
+    mode_label: &str,
+) -> Result<u8, String> {
+    match args.get("addr") {
+        Some(_) => {
+            let raw = get_u16_hex_or_dec(args, "addr", 0).map_err(|e| e.to_string())?;
+            u8::try_from(raw).map_err(|_| {
+                format!("{mode_label} --addr out of range 0x00-0xFF, got 0x{raw:X}")
+            })
+        }
         None => Err(format!(
-            "register 0x{addr:02X} data type unknown; pass --ty (0|i8, 1|i16, 2|i32, 3|f32)"
-        )
-        .into()),
-    }
-}
-
-fn reg_value_text(rv: &RegisterValue) -> String {
-    match rv {
-        RegisterValue::I8(x) => format!("{x}"),
-        RegisterValue::I16(x) => format!("{x}"),
-        RegisterValue::I32(x) => format!("{x}"),
-        RegisterValue::F32(x) => format!("{x:.4}"),
+            "{mode_label} requires --addr (hex or decimal, 0x00-0xFF)"
+        )),
     }
 }
 
@@ -283,19 +265,12 @@ pub fn run_hightorque(
     for i in 0..send_count {
         match mode.as_str() {
             "ping" | "read" => {
-                motor
-                    .request_motor_feedback(Duration::from_millis(500))
-                    .map_err(|e| e.to_string())?;
-                match motor.latest_state() {
-                    Some(s) => print_state("[ok]", &s),
-                    None => {
-                        return Err(format!(
-                            "hightorque {} timeout on id={} (request cmd=0x17,0x01)",
-                            mode, motor_id
-                        )
-                        .into());
-                    }
-                }
+                // 阻塞等新鲜状态(≤500ms):vendor request_fresh_state,
+                // 超时即报错——ping 语义 = 确认电机在总线在线且回帧。
+                let state = motor
+                    .request_fresh_state(Duration::from_millis(500))
+                    .map_err(|e| format!("hightorque {} on id={} failed: {e}", mode, motor_id))?;
+                print_state("[ok]", &state);
             }
             "pos" => {
                 // 普通位置模式 07 07:vendor send_cmd_pos_classic,力矩为
@@ -423,33 +398,36 @@ pub fn run_hightorque(
                     .map_err(|e| e.to_string())?;
             }
             "read-reg" => {
-                // 通用寄存器读 17 族:vendor read_registers。返回 raw 值,
-                // 物理量标度换算按寄存器功能表由调用方完成;名称/类型
-                // 取自 vendor 寄存器表(parameter_info)。
-                let addr = match args.get("addr") {
-                    Some(_) => get_u16_hex_or_dec(args, "addr", 0)? as u8,
-                    None => {
-                        return Err(
-                            "read-reg requires --addr (hex or decimal, 0x00-0x45)".into(),
-                        )
-                    }
-                };
+                // 通用寄存器读 17 族:vendor read_registers(2026-10-22 起
+                // **固定 Int16**,--ty 已删除)。返回**换算后物理量**(按
+                // vendor 寄存器表的 quantity 归类:位置/速度→rad 族、力矩
+                // 套型号 k、电流/电压/温度/PWM/PID 按各自 scale;无换算
+                // 关系的寄存器 1:1)。名称/单位按每行地址查 parameter_info
+                // (C2:旧实现每行都打基础地址的寄存器名,张冠李戴)。
+                // 地址越界在 reg_addr_from_args 处拒绝(B2)。
+                if args.contains_key("ty") {
+                    return Err(
+                        "--ty was removed: register reads are fixed Int16 (2026-10-22)".into(),
+                    );
+                }
+                let addr = reg_addr_from_args(args, "read-reg")?;
                 let count = get_u64(args, "count", 1)?.clamp(1, 3) as u8;
-                let ty = reg_ty_from_args(args, addr)?;
                 let timeout_ms = get_u64(args, "timeout-ms", 500)?;
                 let vals = motor
-                    .read_registers(&[ReadCmd { addr, ty, count }], Duration::from_millis(timeout_ms))
+                    .read_registers(&[ReadCmd { addr, count }], Duration::from_millis(timeout_ms))
                     .map_err(|e| e.to_string())?;
-                let name = parameter_info(addr)
-                    .map(|i| i.name)
-                    .unwrap_or("unknown");
-                for (a, rv) in &vals {
+                for (a, v) in &vals {
+                    // C2:每行按自身地址查名/单位,而非基础地址。
+                    let (name, unit) = match parameter_info(*a) {
+                        Some(i) => (
+                            i.name,
+                            i.quantity.map(|q| q.unit_label()).unwrap_or(""),
+                        ),
+                        None => ("unknown", ""),
+                    };
                     println!(
-                        "[ok] mode=read-reg id={} addr=0x{:02X} name={} value={}",
-                        motor_id,
-                        a,
-                        name,
-                        reg_value_text(rv)
+                        "[ok] mode=read-reg id={} addr=0x{:02X} name={} unit={} value={:+.4}",
+                        motor_id, a, name, unit, v
                     );
                 }
             }
@@ -492,16 +470,12 @@ pub fn run_hightorque(
             }
             "write-reg" => {
                 // 通用寄存器写 05 <addr> <val16>:vendor write_register。
+                // 读写不对称(2026-10-22 决策):读返回换算后物理量,写
+                // 仍收 raw i16(寄存器值域即 i16,换算由调用方按表完成)。
                 // --config 1 表示配置类寄存器(扩展 0x8000|id 帧),
-                // 缺省 0 走控制通道(控制目标类)。
-                let addr = match args.get("addr") {
-                    Some(_) => get_u16_hex_or_dec(args, "addr", 0)? as u8,
-                    None => {
-                        return Err(
-                            "write-reg requires --addr (hex or decimal, 0x00-0x45)".into(),
-                        )
-                    }
-                };
+                // 缺省 0 走控制通道(控制目标类)。地址越界在
+                // reg_addr_from_args 处拒绝(B2:不再 as u8 截断)。
+                let addr = reg_addr_from_args(args, "write-reg")?;
                 let value = get_i16(args, "value", 0)?;
                 let config = get_u64(args, "config", 0)? != 0;
                 let name = parameter_info(addr)
@@ -549,8 +523,7 @@ pub fn run_hightorque(
 
 #[cfg(test)]
 mod tests {
-    use super::reg_ty_from_args;
-    use motor_vendor_hightorque::RegisterType;
+    use super::reg_addr_from_args;
 
     use std::collections::HashMap;
 
@@ -561,44 +534,27 @@ mod tests {
             .collect()
     }
 
+    /// B2 回归(2026-10-21):地址越界(> 0xFF)拒绝,不再 as u8 截断
+    /// (旧实现 --addr 0x145 会静默操作 0x45)。
     #[test]
-    fn read_reg_ty_explicit_wins_over_table() {
-        // 0x01 位置在寄存器表中为 Int16,显式 --ty 覆盖为 Int32。
-        let a = args(&[("ty", "2")]);
-        assert!(matches!(
-            reg_ty_from_args(&a, 0x01),
-            Ok(RegisterType::Int32)
-        ));
-    }
+    fn reg_addr_rejects_out_of_range() {
+        let a = args(&[("addr", "0x100")]);
+        assert!(reg_addr_from_args(&a, "read-reg").is_err());
 
-    #[test]
-    fn read_reg_ty_falls_back_to_table() {
+        let a = args(&[("addr", "0x145")]);
+        let e = reg_addr_from_args(&a, "write-reg").unwrap_err();
+        assert!(e.contains("out of range"), "got: {e}");
+
+        // 合法域边界放行
+        let a = args(&[("addr", "0xFF")]);
+        assert_eq!(reg_addr_from_args(&a, "read-reg"), Ok(0xFF));
+        let a = args(&[("addr", "0")]);
+        assert_eq!(reg_addr_from_args(&a, "read-reg"), Ok(0));
+
+        // 缺参报错
         let a: HashMap<String, String> = HashMap::new();
-        // 0x01(位置)表内已核实 Int16;0x0F(错误代码)表内未给出类型。
-        assert!(matches!(
-            reg_ty_from_args(&a, 0x01),
-            Ok(RegisterType::Int16)
-        ));
-        assert!(reg_ty_from_args(&a, 0x0F).is_err());
-    }
-
-    #[test]
-    fn read_reg_ty_accepts_string_aliases() {
-        for (raw, want) in [
-            ("i8", RegisterType::Int8),
-            ("i16", RegisterType::Int16),
-            ("i32", RegisterType::Int32),
-            ("f32", RegisterType::Float),
-            ("3", RegisterType::Float),
-        ] {
-            let a = args(&[("ty", raw)]);
-            assert!(matches!(reg_ty_from_args(&a, 0x01), Ok(t) if t == want));
-        }
-    }
-
-    #[test]
-    fn read_reg_ty_rejects_invalid() {
-        let a = args(&[("ty", "9")]);
-        assert!(reg_ty_from_args(&a, 0x01).is_err());
+        assert!(reg_addr_from_args(&a, "read-reg")
+            .unwrap_err()
+            .contains("requires --addr"));
     }
 }

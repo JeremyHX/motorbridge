@@ -212,7 +212,7 @@ impl SessionCtx {
                 // 收敛(2026-09-29):17 01 查询、等待、解码、物理量换算全部走
                 // vendor(带力矩系数补偿),取代此前手写 wait+raw 换算(力矩
                 // 平移 ÷100、status 恒 0 的两处错误随之消灭)。
-                let _ = motor.request_motor_feedback(Duration::from_millis(120));
+                let _ = motor.request_fresh_state(Duration::from_millis(120));
                 if let Some(s) = motor.latest_state() {
                     Ok(json!({
                         "vendor": "hightorque",

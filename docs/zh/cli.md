@@ -118,8 +118,8 @@ cargo run -p motor_cli --release -- \
 - `volt`（DQ 电压模式 `01 00 08 05 1B`）：`--volt <V>`（0.1 V/LSB，协议只定义 Q 分量）
 - `cur`（DQ 电流模式 `01 00 09 05 1C`）：`--cur <A>`（0.1 A/LSB）
 - `set-mode`（运行模式切换 `01 00 <mode>`）：`--run-mode <0-17>`（表2；0=停止并清错，8=DQ 电压，9=DQ 电流，10=位置，15=刹车）
-- `read-reg`（通用寄存器读 `17` 族）：`--addr <hex|dec>` 必填、`--count`（1-3，默认 1）、`--ty`（`0|i8`/`1|i16`/`2|i32`/`3|f32`，缺省回落寄存器表，无则必填）；打印 raw 值与寄存器名
-- `write-reg`（通用寄存器写 `05 <addr> <val16>`）：`--addr` 必填、`--value <int16>`、`--config`（0/1，1=配置类走扩展帧，缺省 0 走控制通道）
+- `read-reg`（通用寄存器读 `17` 族）：`--addr <hex|dec>` 必填、`--count`（1-3，默认 1）；2026-10-22 起读取**固定按 Int16**（`--ty` 已删除，显式传入会报错），返回**换算后物理量**（位置/速度/加速度→rad 族、力矩→N·m 套型号 k、电流/电压/温度/PWM/PID 按各自 scale；无换算关系的寄存器 1:1），每行打印该行地址的寄存器名与单位；地址须在寄存器表（0x00-0x45 中 xlsx 列出的 43 个）内，缺号/表外地址读/写均报错
+- `write-reg`（通用寄存器写 `05 <addr> <val16>`）：`--addr` 必填（同样须在寄存器表内，缺号/表外拒绝）、`--value <int16>`、`--config`（0/1，1=配置类走扩展帧，缺省 0 走控制通道）
 - `periodic-report`（周期上报 `05 B4 02 <t_ms>`）：`--period-ms`（≥1 开启电机主动状态流，0 停止；`timed-read` 为旧名别名）
 - `stop` / `brake`（模式 15，三相短接阻尼刹车）/ `rezero` / `conf-write`
 
@@ -169,10 +169,10 @@ cargo run -p motor_cli --release -- \
 ```
 
 ```bash
-# 读 3 个连续寄存器（位置/速度/转矩，int16）
+# 读 3 个连续寄存器（位置/速度/转矩，固定 Int16，返回换算后物理量 rad/rad·s⁻¹/N·m）
 cargo run -p motor_cli --release -- \
   --vendor hightorque --channel can0 --motor-id 1 \
-  --mode read-reg --addr 0x01 --count 3 --ty i16
+  --mode read-reg --addr 0x01 --count 3
 ```
 
 ## MyActuator 示例

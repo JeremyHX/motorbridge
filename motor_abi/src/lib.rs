@@ -6,9 +6,7 @@ use motor_vendor_hexfellow::{
     HexfellowController, HexfellowMotor, MitTarget as HexfellowMitTarget,
     PosVelTarget as HexfellowPosVelTarget,
 };
-use motor_vendor_hightorque::{
-    HightorqueController, HightorqueMotor, ReadCmd, RegisterType,
-};
+use motor_vendor_hightorque::{HightorqueController, HightorqueMotor, ReadCmd};
 use motor_vendor_myactuator::{
     ControlMode as MyActuatorControlMode, MyActuatorController, MyActuatorMotor,
 };

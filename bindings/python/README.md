@@ -177,7 +177,7 @@ HighTorque SDK extensions (beyond the unified modes, motor-handle methods):
 - `hightorque_set_run_mode(mode)` — run-mode switch (`01 00 <mode>`, register 0x000), mode 0-17 per table 2 (0 = stop & clear error); sends a real frame unlike `ensure_mode`.
 - `hightorque_write_register(addr, value, config_class=False)` — generic register write (`05 <addr> <val16>`); `config_class=True` sends via the extended `0x8000|id` frame.
 - `hightorque_set_periodic_report(period_ms)` — periodic status report (`05 B4 02`): `>=1` enables the motor-initiated `27 01` status stream, `0` stops it.
-- `hightorque_get_register(addr, ty=1, count=1, timeout_ms=500) -> list[float]` — generic register read (`17` family); `ty`: 0=Int8 / 1=Int16 / 2=Int32 / 3=Float, `count` 1-3; returns raw values.
+- `hightorque_get_register(addr, count=1, timeout_ms=500) -> list[float]` — generic register read (`17` family); **fixed Int16 since 2026-10-22** (`ty` param removed; passing it errors at the ABI boundary), returns **converted physical values** (pos/vel/acc in rad-family units, torque in N·m via model k, current/voltage/temperature/PWM/PID per scale; unclassified registers 1:1). `addr` (and every address covered by `count`) must be in the HighTorque parameter table — the 43 xlsx-listed registers within 0x00-0x45; missing (缺号) and out-of-table addresses error out for both read and write (same rule as `hightorque_write_register`). ⚠ signature change: the old positional call `get_register(0x01, 1, 3)` (addr, ty, count) silently becomes (addr, count=1, timeout_ms=3) — re-check positional args when migrating scripts.
 - `get_state()` now also returns `fault_code` (HighTorque table-3 fault code, 0 = no fault; other vendors always 0).
 
 ## Quick Start

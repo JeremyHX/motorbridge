@@ -42,7 +42,7 @@ Python bindings ──ctypes──> motor_abi(C ABI) ──> motor_vendor_highto
 | 9 | DQ 电流（模式 9+写 0x1c） | `01 00 09` + `05 1c`（拼一帧） | ✅ [新] send_cmd_dq_current（0.1 A/LSB） | ✅ [新] send_dq_current | ✅ [新] hightorque_send_dq_current | ✅ [新] cur 模式（--cur A，删 raw-cur） | ✅ [新] dq_current op |
 | 10 | 刹车（模式 15） | `01 00 0F` | ✅ [新] brake | ✅ [新] brake | ✅ [新] hightorque_brake | ✅ [新] brake 模式（vendor 调用） | ✅ [新] brake op |
 | 11 | 运行模式切换（写 0x000） | `01 00 <mode>` | ✅ [新] send_run_mode（0-17 校验+真发帧；ensure_control_mode 保持仅校验语义不变） | ✅ [新] set_run_mode | ✅ [新] hightorque_set_run_mode | ✅ [新] set-mode 模式（--run-mode 0-17） | ✅ [新] run_mode op |
-| 12 | 通用寄存器读（0x17 族） | `17 <cmd/addr>` | ✅ read_registers | ✅ [补] get_register（ty+count，raw 值） | ✅ | ✅ [补] read-reg 模式（--addr/--count/--ty，名称取寄存器表） | ✅ [补] read_register op |
+| 12 | 通用寄存器读（0x17 族） | `17 <cmd/addr>` | ✅ read_registers | ✅ [补] get_register（count；2026-10-22 起固定 Int16、返回换算后物理量） | ✅ | ✅ [补] read-reg 模式（--addr/--count，固定 Int16，每行名称/单位按行地址查表） | ✅ [补] read_register op |
 | 13 | 读状态（= #12 特例） | `17 01` | ✅ request_motor_feedback | ✅（500ms 硬编码） | ✅ | ✅ [收敛] vendor request_motor_feedback（state_seq 后轮询模式下不再假超时） | ✅ [收敛] vendor（read/state_once/status/verify） |
 | 14 | 通用寄存器写 | `05 <reg> <val>` | ✅ [新] write_register（控制类走控制通道，配置类走扩展帧） | ✅ [新] write_register（addr+val16+config_class） | ✅ [新] hightorque_write_register | ✅ [新] write-reg 模式（--addr/--value/--config） | ✅ [新] write_register op |
 | 15 | 周期上报（0x05 B4） | `05 B4 02 <t>` | ✅ [新] set_periodic_report（0=停止） | ✅ [新] set_periodic_report | ✅ [新] hightorque_set_periodic_report | ✅ [新] periodic-report 模式（--period-ms；timed-read 保留别名） | ✅ [新] periodic_report op |
@@ -138,7 +138,7 @@ Python bindings ──ctypes──> motor_abi(C ABI) ──> motor_vendor_highto
 | 状态数据 | 物理量+status_name | 物理量+12 故障布尔位 | 物理量（deg） | 物理量（rev/permille） | 物理量+status/fault/温度（此前 raw 三元组） |
 | gateway 剩余换算 | 无 | mode→字符串 | deg→rad | rev→rad、permille→Nm | 无（仅 scan 发现仍 raw） |
 
-寄存器/参数模式：帧编解码+verify 在 vendor，地址语义由客户端传参（Damiao rid 直通 `get_register_f32`，RobStride param_id 直通类型化读写，HighTorque `read_registers` 直通 addr/ty/count——2026-09-30 补通）；唯一 gateway 侧表知识是 Damiao scan 硬编码 rid 21/22/23，但型号识别仍调 vendor `match_models_by_limits`。
+寄存器/参数模式：帧编解码+verify 在 vendor，地址语义由客户端传参（Damiao rid 直通 `get_register_f32`，RobStride param_id 直通类型化读写，HighTorque `read_registers` 直通 addr/count——2026-09-30 补通，2026-10-22 删 ty 固定 Int16）；唯一 gateway 侧表知识是 Damiao scan 硬编码 rid 21/22/23，但型号识别仍调 vendor `match_models_by_limits`。
 
 ~~HighTorque 是五家中唯一"上位机内置换算逻辑"的，且已做错~~ **[收敛消灭，2026-09-29]**：与其余四家同构；仅 scan 发现（`17 01`/`27 01` 广播收发）保留 gateway 本地裸总线实现。
 
@@ -246,7 +246,7 @@ Python bindings ──ctypes──> motor_abi(C ABI) ──> motor_vendor_highto
 | F1 梯形 07 2d | `send_cmd_pos_vel_acc`（已有） | `motor_handle_hightorque_send_pos_vel_acc` | `hightorque_send_pos_vel_acc` | `--mode pos-vel-acc` | `pos_vel_acc` op（ActiveCommand::PosVelAcc，continuous tick 复用） |
 | F2 经典位置 07 07 | `send_cmd_pos_classic`（已有） | `motor_handle_hightorque_send_pos_classic`（NaN=无限制） | `hightorque_send_pos_classic`（tqe=None） | `--mode pos`（已有） | `pos_classic` op（一次性，tqe 可缺省） |
 | F3 固件版本 15 B5 02 | `request_firmware_version`（已有） | `motor_handle_hightorque_request_firmware_version`（out major/minor/patch） | `hightorque_request_firmware_version` | `--mode version` | `version` op（解除 myactuator-only） |
-| F4 寄存器读 17 族 | `read_registers`（已有） | `motor_handle_hightorque_get_register`（addr/ty/count → raw f32 数组） | `hightorque_get_register` | `--mode read-reg`（--addr/--count/--ty，名称取 PARAMETER_TABLE） | `read_register` op（ty 缺省回落寄存器表，无则要求显式） |
+| F4 寄存器读 17 族 | `read_registers`（已有） | `motor_handle_hightorque_get_register`（addr/count → 换算后 f32 物理量数组；2026-10-22 删 ty） | `hightorque_get_register` | `--mode read-reg`（--addr/--count，固定 Int16，每行名称/单位按行地址查 PARAMETER_TABLE） | `read_register` op（固定 Int16，返回物理量；ty 字段已删，显式携带报错） |
 | F5 fault_code | `HightorqueFeedbackState.fault_code`（已有） | `MotorState.fault_code`（结构体末尾追加，旧布局不变；其余厂商恒 0） | `MotorState.fault_code` | 已有 | 已有 |
 
 **有意不接**：`send_with_ack`（#22，裸帧+ACK 原语无独立用户语义，上层应调语义化命令）；RunMode 字符串解码（#20，显示层美化，status_code 原始字节已透传，对照表见 [hightorque_can_protocol.md](hightorque_can_protocol.md)）。
@@ -327,3 +327,89 @@ bit15 置于非查询指令，电机只回一帧数据段长度为 0 的帧—�
 **影响面**：控制类帧（07 07 / 07 35 / 07 2d / 05 13 / 01 00 族 / DQ）仲裁 ID 从扩展 `0x8000|id` 变为裸 id 标准 11 位——与官方参考固件逐帧一致；消除每控制帧一个 DLC=0 空帧的总线开销（100Hz 控制流 = 每秒 100 个废帧）。接收路径（`accepts_frame` 判 `id<<8`）与状态刷新机制（周期上报/主动查询）不受影响。
 
 **验证**：`cargo test -p motor_vendor_hightorque`（87 通过）+ `-p motor_abi`（19）+ `-p motor_cli`（12）+ `-p ws_gateway`（6）全绿。
+
+---
+
+## 14. 寄存器读固定 Int16 + 换算后物理量 + ty 参数全链路删除（2026-10-22）
+
+**决策**（用户，2026-10-22）：HighTorque 寄存器读（`17` 族）**固定按 Int16** 读取，`ty` 参数（CLI `--ty` / 网关 JSON `ty` / ABI FFI 形参 / Python 形参）全链路删除；读返回值从 raw 改为**换算后物理量**——位置/速度/加速度 → rad 族（与 `get_state` 同式）、力矩套型号 k/d（`tqe_restore_raw`）、电流/电压/温度/PWM/PID 按各自 scale；**没提供换算关系的寄存器（0x00/0x06/0x0F/0x18/0x27 及表外地址）1:1 返回原值**。此变更同时终结评审 C1（ty 映射 5 处重复随参数消亡）与 C2（read-reg 每行按行地址查名/单位）。
+
+**改动**：
+- vendor `protocol.rs`：`ReadCmd { addr, count }`（删 `ty`）；`cmd_byte()` 固定 `0b0001_0000 | (Int16.cmd_bits() << 2) | count`；新增 `TEMP_SCALE`（0.1°C/LSB）、`TIME_SCALE`（0.001s/LSB，表内暂无映射）、`PWM_SCALE`（归一化 1/32767）；`RegisterType::data_type()` 桥接 `QuantityScale::scale`。全类型回复解码（`decode_register_reply`/`RegisterValue`）**保留**——外来/周期帧仍按实际类型入缓存。
+- vendor `registers.rs`：`RegisterInfo.ty` → `quantity: Option<Quantity>`（43 项按物理量归类，名称推断项行内标注"待真机校准"）；新增 `parameter_quantity()` / `register_physical_value(addr, v, c)`（I16 力矩直走 `tqe_restore_raw`、Pos/Vel 经 `decode_unit_raw(Rad)`——与状态路径同函数，逐位一致；外来 Int8/I32 条目按 raw/scale 推广）。
+- vendor `motor.rs`：`read_registers` 返回 `Vec<(u8, f32)>`（物理量）；`cached_register` → `Option<f32>`（跨类型取最新后换算）；`fresh_registers` 固定按 `(addr, Int16)` 键认领——A3 防护保留（外来 I8/I32 条目永不被认领）；缓存结构 `(addr, RegisterType) -> RegisterValue` 不动。新增 `read_registers_pos_matches_state_path` 对齐守卫（同一 `27 01` 回帧，读路径与状态路径换算逐位一致）。
+- ABI：`motor_handle_hightorque_get_register(motor, addr, count, timeout_ms, out_values)`、`motor_handle_hightorque_request_register(motor, addr, count)`（均删 ty，**破坏性 ABI 变更**，先例 A1）；`get_cached_register` C 签名不变、语义 raw→物理量（头文件注明）。
+- CLI：`--ty` 显式报错（不静默忽略）；read-reg 输出 `name=<行地址名> unit=<单位> value=<物理量>`（C2）；删 `reg_ty_from_args`/`reg_value_text` 及 4 个 ty 测试。
+- ws_gateway：`ty` 字段显式报错；响应 `registers:[{addr,name,unit,value}]`（删顶层 name/type）；request_feedback 路径 ReadCmd 去 ty。
+- Python：`hightorque_get_register(addr, count=1, timeout_ms=500)`、`hightorque_request_register(addr, count=1)`——**位置参数陷阱**：旧 `get_register(0x01, 1, 3)`（addr,ty,count）静默变成 (addr,count=1,timeout_ms=3)，已在 docstring 与 README 标注。
+- 写路径（`write_register`）保持 raw i16 不变——读写不对称（写 raw / 读物理量），各层文档注明。
+
+**验证**：`cargo test -p motor_vendor_hightorque`（100）+ `-p motor_abi`（20）+ `-p motor_cli`（9）+ `-p ws_gateway`（11）+ `cargo check --workspace --all-targets` 全绿；Python `py_compile` 三文件通过、pytest 15/16（唯一失败为 robstride scan 的预存环境问题：测试 patch `scan.Controller` 但实际构造走 `common._open_controller`，真实打开 can0 失败，与本次改动无关）。
+
+### 14.1 追补决策：缺号/表外地址拒绝访问（同日）
+
+**决策**（用户，2026-10-22 追补）：xlsx 寄存器表（0x00-0x45，43 项）之外一律**拒绝访问**——表内缺号地址（0x07-0x0C、0x13、0x17、0x1E/0x1F、0x2A、0x2E/0x2F、0x35-0x3F）与表外地址（0x46-0xFF）读/写均整段报错且零发帧；连续读 span 覆盖任一非表内地址即整段拒绝；0xB3（落盘）/0xB4（周期上报）是命令地址不算寄存器（经各自专用命令访问）。此前这些地址按 Int16 默认 1:1 读出——能发帧能回值，但语义是猜的，不再放行。
+
+**改动**（单源校验于 vendor，ABI/CLI/网关/Python 自动继承）：
+- `registers.rs`：新增 `is_known_register(addr)` / `ensure_known_span(addr, count)`（报错文本带具体地址，供上层透传）。
+- `motor.rs`：`request_registers`（读路径总入口，`read_registers` 经其发帧）对每条 cmd 的 span 预校验；`write_register` 校验单地址；`cached_register` 对表外地址直接 `None`。
+- 推论：表最高地址 0x45，合法请求永不越过 0xFF——B3 的地址回绕在自家请求路径上不可达（回绕语义保留给解码侧处理外来帧），B3 回归测试改写为拒绝测试 `read_registers_rejects_unknown_addr_span`。
+- 各层测试：vendor `known_register_membership`/`ensure_known_span_atomic`/拒绝测试；ABI `hightorque_get_register_rejects_unknown_addr`（int16_single 的 0x0A 用例迁至表内 0x0F）；网关 `read_write_register_rejects_unknown_table_addr`（原 0xFF 边界发帧用例改用表内最高地址 0x45）。
+- 文档：can_protocol §4 地址准入段 + §11 速查注、命令 7 注；网关 PROTOCOL §14.3（addr 行改表内校验、回绕表述删除）；CLI zh/en read-reg/write-reg；Python README get_register。
+- **验证**：hightorque 102 / abi 21 / cli 9 / ws_gateway 12 全绿 + `cargo check --workspace --all-targets`。
+
+## 15. 状态缓存：帧未携带的字段不覆盖（2026-10-23）
+
+**决策**（用户，2026-10-23）：`get_state()` 取的是状态缓存最新值，而 `27 01` 读回复只携带 pos/vel/tqe——帧里没有的**字段（运行模式/故障码/温度）不应覆盖缓存**，而不是置 0。旧实现 `decode_read_reply` 把 `status_code/fault_code` 置 0、`t_mos/t_rotor` 置 0.0 后整体 `state.update()`，一次状态查询（`request_fresh_state`/周期上报/ping-read）就会把状态反馈帧（byte1=表3 故障码）带来的故障码冲掉，表现为"发查询后故障码消失"。
+
+**改动**（合并策略在 motor.rs 缓存入口，纯解码函数不动）：
+- `motor.rs` `process_feedback_frame`：decode 后、入缓前做缺席字段合并——`27 01` 读回复（`data[0]==0x27`）保留旧 `status_code/fault_code`；两种帧都保留旧 `t_mos/t_rotor`（状态反馈帧同样不含温度）。帧里有的字段照常更新（`received_at` 新鲜度照常推进，`request_fresh_state` 判定不受影响）。首帧前无旧值时保持 0/0.0（未知显示为默认值）。
+- `protocol.rs`：`decode_read_reply`/`decode_status_frame` 文档注释注明缺席字段填 0 仅为结构体占位、"非值为 0"，合并规则在 motor.rs。
+- 回归测试 `read_reply_preserves_cached_fault_code`：控制状态帧置 fault=0x22 → `27 01` 回复后 fault 保持 0x22 且 pos 更新 → 新控制状态帧（停止清错）照常刷新 fault=0。
+- 遗留（本次未做）：0x0F 错误代码寄存器的 raw 码值与表3 的对应关系未核实（评审新条目）；核实后可考虑把 0x0F 读桥接进状态缓存 fault_code。
+
+**验证**：hightorque 103 / abi 21 / cli 9 / ws_gateway 12 全绿 + `cargo check --workspace --all-targets`。
+
+## 16. ABI `request_feedback` HT 分支改非阻塞（2026-10-23）
+
+**决策**（用户，2026-10-23）：统一入口 `motor_handle_request_feedback` 的 HT 分支由 `request_fresh_state(500ms)`（发 `17 01` 后阻塞轮询 ≤500ms）改为 `request_motor_feedback()`——**DM 语义非阻塞**，发帧即返回。动机：同名 op 跨层语义分裂——网关 `request_feedback` op（register.rs）走的就是非阻塞原语，Damiao/MyActuator 分支也是非阻塞，Robstride 分支注释明确拒绝做成阻塞 ping，唯独 HT（及 Hexfellow）阻塞。B1 时给 ABI 选阻塞的理由是 record_play.py 依赖"阻塞求回复/掉线靠超时"——该文件当前工作树与 git 历史均已不存在，依赖消失。
+
+**改动**：
+- `motor_control_ffi.rs`：HT 分支改调 `request_motor_feedback()`（`17 01` 唯一发送原语不变；`request_fresh_state` 组合保留，CLI ping/read、网关 read op/会话循环继续用）。
+- 回归测试 `hightorque_request_feedback_nonblocking`：Mock 总线无回复必须 rc=0 且耗时 <100ms（旧实现在此 Timeout → rc=-1），帧为 dlc 2 的 `17 01`。
+- ABI 头文件 `motor_handle_request_feedback` 加各厂商语义注释；Python `request_feedback()` docstring 同步（含"掉线不再表现为 Timeout 报错，而是缓存无值/冻结；要严格新鲜度用 get_state_snapshot 的 received_at；要发同帧阻塞等回用 hightorque_get_register(0x01, 3)"）。
+- demo（hightorque_all_interfaces_demo.py）probe 段与 `_current_pos` 注释更新：`request_feedback + sleep + get_state` 的既有模式在非阻塞下反而更自然（本就是 DM 惯用法），掉线检测落到 get_state 返回 None/冻结。
+
+**行为影响**（破坏性语义变更，无 ABI 签名变化）：调用方若依赖"request_feedback 报错=掉线"的探测语义需改用 `hightorque_get_register(0x01, 3)`（发同帧阻塞等回，超时报错）或 `get_state_snapshot` 时间戳判新鲜。
+
+**验证**：motor_abi 22 全绿（新增 1）；hightorque 103 / cli 9 / ws_gateway 12 不变；py_compile 通过。
+
+**2026-10-24 追补（该变更埋下的回归,当日发现当日修）**：Python CLI `scan --vendor hightorque`（`_scan_hightorque`）在 `request_feedback()` 后**立即** `get_state()`——非阻塞语义下回帧 ≥0.5ms 后才入缓,立即读恒 `None`,扫描永远 miss。10-17 至 10-23 期间未被发现的原因:Python 加载的 `target/release/libmotor_abi.so` 一直是 10 月 17 日旧编译产物（HT 分支仍为阻塞版),源码非阻塞化从未真正生效;10-24 重建 .so 后实机复现（电机在位 ID 0x01,扫描 0 命中）,修复为 damiao 分支同款"发帧 + 轮询至 timeout_ms"后复测命中（pos=-0.1451rad）。**流程教训:改 ABI/Rust 源后必须 `cargo build -p motor_abi --release` 再跑 Python,加载顺序 MOTORBRIDGE_LIB > 包内 lib/ > target/release**。
+
+## 17. request_feedback 两帧化 + 接收端桥接 + 一次状态计数（2026-10-24）
+
+**背景**：2026-10-23 规划的"扩展 request_feedback"原设计为**单帧拼 3 对**读 6 个寄存器（pos/vel/tq + mode + temp + error）。当日 can0 真机实测证伪该帧型，设计随之修正为两帧。
+
+**真机实测结论（can0, 1 Mbps, 电机 ID 0x01, candump -tz + 单 socket Python 连发）**：
+
+1. **固件读请求一帧一对**：帧内只解析第一对 `(cmd, addr)`，尾随字节必须全零——dlc 3-8 零尾随帧均正常受理（含旧 B1 的 dlc-8 零填充）；多对拼帧（`17 01 15 00 16 0E` / `15 00 16 0E`）被**整帧静默丢弃**（零回帧，连 DLC=0 错误帧都没有）。
+2. **控制帧回帧复测**（再证 2026-10-09 结论）：标准裸 id 控制帧 `01 00 00` → 零回帧；bit15 扩展帧 → 恰一帧 DLC=0 空帧（零信息）。
+3. **时序**：`17 01` + `16 0E` 单 socket 连发，电机按请求顺序**串行回帧**——`27 01` +610µs、`26 0E` +1023µs（三帧版末帧），回帧间隔 ~210-250µs，单帧延迟 ~0.5ms。cansend 多进程连发的 ~1.2ms 帧间隔是进程启动开销，非总线行为。
+4. **温度+错误码可一帧读**：0x0E/0x0F 地址连续，`16 0E` → `26 0E <t16> <e16>` 一帧带回（实测 32.0-32.3°C、错误码 0）。
+
+**实现**（用户决策 2026-10-24：非阻塞发两帧；两回帧合为一次状态计数；控制帧回帧确认无信息）：
+
+- **`motor_core/feedback.rs`**：`FeedbackCache` 新增纯增量 `patch_latest(f)`——就地修改最新快照字段，**不推进序号、不刷新 received_at**；无快照返回 `Ok(false)`。跨厂商组件，其余厂商零调用零行为变化；回归测试 `patch_latest_mutates_state_without_bumping_sequence`。
+- **`protocol.rs`**：`encode_read(cmds) -> Option<[u8;2]>`——签名从"多对拼帧"改为单命令 2 字节（cmd 的 count 位覆盖连续地址）；多对拼帧编码随真机证伪删除。
+- **`motor.rs`**：
+  - `request_registers`：多条 ReadCmd **逐帧连发**（一帧一对）；整组地址先校验后发送（原子拒绝零发帧保持）；
+  - `request_motor_feedback`：连发两帧 `17 01`（0x01-0x03）+ `16 0E`（0x0E-0x0F）；模式 0x00 不在此帧组（与 0x01 隔缺号地址，独立读 `15 00` 同样经桥接补丁 status_code）；
+  - `process_feedback_frame`：寄存器回帧入缓后新增**桥接**——0x00→status_code（1:1）、0x0E→t_mos（×0.1°C，走 `register_physical_value`）、0x0F→fault_code（1:1，表3 对应关系用户 2026-10-23 确认），经 `patch_latest` 就地补丁，**不推进状态计数**。锚定帧 `27 01` 照旧 `state.update()`（序号 +1）——**两回帧合为一次状态计数**，received_at 只被锚定帧推进，`request_fresh_state` 新鲜度语义自动正确（无需单独的 full_state_at 时钟）。独立寄存器读（`15 00`/`16 0E`）的回帧同样经桥接补丁。
+- **`motor_abi`**：`hightorque_request_feedback_nonblocking` 改断言两帧；`motor_abi.h` request_feedback 注释更新（两帧 + 锚定/补丁计数语义）。
+- **网关**：`register.rs` request_feedback op 改调 `m.request_motor_feedback()`（原直接拼 `request_registers(&[0x01×3])` 单帧读，与 vendor 方法对齐同源）。
+- **Python**：`core.py` `request_feedback` docstring 更新（两帧、锚定/补丁、一次计数）。
+- **文档**：can_protocol §1.2 bit15 复测注、命令 7 真机更正块（一帧一对 + 实测表 + 时序）、举例 2 改逐帧、命令 8 两帧仓库行为注、§3.1 桥接补充（0x0F 1:1 已确认）。
+
+**不覆盖原则保持**：27 01 锚定帧继续保留 status_code/fault_code/t_mos 旧值（§15 决策），补丁帧只写自己携带的字段；补丁帧先到（锚定未到）则丢弃（`patch_latest` 返回 false），不创建快照。
+
+**验证**：hightorque 105（新增 3：逐帧连发 / 温度错误码补丁不推序号 / 模式补丁+孤儿帧丢弃）、motor_core 22（新增 1）、motor_abi 25、cli 9、ws_gateway 12 全绿；`cargo check --workspace --all-targets` 零警告；py_compile 通过。真机 scan 确认 ID 0x01 存活。

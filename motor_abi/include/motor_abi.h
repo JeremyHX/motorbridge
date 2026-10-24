@@ -98,6 +98,16 @@ int32_t motor_handle_send_vel(MotorHandle* motor, float target_velocity);
 int32_t motor_handle_send_force_pos(MotorHandle* motor, float target_position, float velocity_limit, float torque_limit_ratio);
 
 int32_t motor_handle_store_parameters(MotorHandle* motor);
+// Request a feedback frame (unified op, per-vendor semantics). Hightorque: non-blocking
+// since 2026-10-23 (DM semantics, aligned with the gateway op and Damiao) — sends two
+// 2-byte query frames (since 2026-10-24, real-bus verified): 17 01 (pos/vel/torque) and
+// 16 0E (temperature 0x0E + fault code 0x0F, consecutive addresses in one count-2 segment)
+// and returns immediately; the background RX thread caches the replies — the 27 01 reply
+// anchors one state count (sequence +1), the 26 0E reply patches t_mos/fault_code in place
+// without bumping the count. Read it back via motor_handle_get_state /
+// motor_handle_get_state_snapshot. Offline motors surface as stale/absent cached state,
+// not as an error here; use motor_handle_hightorque_get_register(0x01, 3) for
+// send-and-block-wait semantics.
 int32_t motor_handle_request_feedback(MotorHandle* motor);
 int32_t motor_handle_set_can_timeout_ms(MotorHandle* motor, uint32_t timeout_ms);
 
@@ -136,11 +146,23 @@ int32_t motor_handle_damiao_write_param_u32(MotorHandle* motor, uint16_t param_i
 int32_t motor_handle_hightorque_send_pos_vel_acc(MotorHandle* motor, float target_position, float velocity_limit, float acceleration_limit);
 // Classic position mode (07 07): torque limit in Nm; pass NaN for unlimited.
 int32_t motor_handle_hightorque_send_pos_classic(MotorHandle* motor, float target_position, float torque_limit_nm);
-// Firmware version query (15 B5 02), blocking with timeout.
-int32_t motor_handle_hightorque_request_firmware_version(MotorHandle* motor, uint32_t timeout_ms, uint8_t* out_major, uint8_t* out_minor, uint8_t* out_patch);
-// Generic register read (17 family): ty 0=Int8/1=Int16/2=Int32/3=Float, count 1-3
-// consecutive registers; writes `count` f32 values (raw integer values cast to f32).
-int32_t motor_handle_hightorque_get_register(MotorHandle* motor, uint8_t addr, uint8_t ty, uint8_t count, uint32_t timeout_ms, float* out_values);
+// Generic register read (17 family), fixed Int16 since 2026-10-22 (ty removed):
+// count 1-3 consecutive registers; every address in addr..addr+count-1 must be in
+// the HighTorque parameter table (the 43 xlsx-listed registers within 0x00-0x45 —
+// missing/out-of-table addresses are rejected before any frame is sent); writes
+// `count` f32 physical values (pos/vel/acc in rad-family, torque via model k/d,
+// current/voltage/temperature/PWM/PID per scale; unclassified registers 1:1).
+int32_t motor_handle_hightorque_get_register(MotorHandle* motor, uint8_t addr, uint8_t count, uint32_t timeout_ms, float* out_values);
+// Non-blocking register query (17 family, fixed Int16): send the read request and
+// return immediately; the background RX thread caches the reply. Same parameter-
+// table address validation as hightorque_get_register. Read it back via
+// hightorque_get_cached_register (latest value, converted to physical units).
+int32_t motor_handle_hightorque_request_register(MotorHandle* motor, uint8_t addr, uint8_t count);
+// Read the latest cached register value (no frame sent, staleness not checked).
+// Writes out_has_value=1 and the converted physical value, or out_has_value=0 when
+// no reply was ever received for that address or the address is outside the
+// parameter table.
+int32_t motor_handle_hightorque_get_cached_register(MotorHandle* motor, uint8_t addr, uint8_t* out_has_value, float* out_value);
 // Torque mode (05 13): direct torque target in Nm (model coeff compensated).
 int32_t motor_handle_hightorque_send_torque(MotorHandle* motor, float torque_nm);
 // DQ voltage mode (01 00 08 05 1B): Q-axis voltage in V (0.1 V/LSB).
@@ -154,6 +176,8 @@ int32_t motor_handle_hightorque_brake(MotorHandle* motor);
 int32_t motor_handle_hightorque_set_run_mode(MotorHandle* motor, uint8_t mode);
 // Generic register write (05 <addr> <val16>): config_class != 0 sends via extended
 // 0x8000|id frame (config registers), 0 via the control channel (control targets).
+// addr must be in the HighTorque parameter table (missing/out-of-table addresses
+// are rejected before any frame is sent).
 int32_t motor_handle_hightorque_write_register(MotorHandle* motor, uint8_t addr, int16_t value, uint8_t config_class);
 // Periodic status report (05 B4 02 <t_ms16>, extended frame): period_ms >= 1 ms;
 // pass 0 to stop the motor-initiated 27 01 status stream.

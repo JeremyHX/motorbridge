@@ -210,6 +210,18 @@ class Motor:
         )
 
     def request_feedback(self) -> None:
+        """请求电机反馈帧(统一入口, 各厂商语义):
+        HighTorque 2026-10-23 起为 **DM 语义非阻塞**; 2026-10-24 起连发
+        **两帧** 2 字节查询——`17 01`(0x01-0x03 位置/速度/力矩)+
+        `16 0E`(0x0E 温度 + 0x0F 错误码, 地址连续并入一帧)——即返回,
+        回帧由后台收帧线程入缓存: `27 01` 回帧锚定一次状态计数
+        (sequence +1), `26 0E` 回帧就地补丁 t_mos/fault_code(不推进
+        计数, 两回帧合为一次状态更新), 之后 get_state /
+        get_state_snapshot 读取。掉线不表现为本方法报错(无回复即静默),
+        需要新鲜度判定用 get_state_snapshot 的 received_at; 需要"发同帧
+        并阻塞等回"用 hightorque_get_register(0x01, 3)。Damiao/
+        MyActuator 同为非阻塞; Robstride 为空操作(无单次状态查询命令);
+        Hexfellow 为阻塞查询(300ms)。"""
         _ok(self._abi.lib.motor_handle_request_feedback(self._require_open()), "request_feedback")
 
     def hightorque_send_pos_vel_acc(self, pos: float, vlim: float, acc: float) -> None:
@@ -233,48 +245,53 @@ class Motor:
         )
 
     def hightorque_get_register(
-        self, addr: int, ty: int = 1, count: int = 1, timeout_ms: int = 500
+        self, addr: int, count: int = 1, timeout_ms: int = 500
     ) -> list[float]:
         """HighTorque 通用寄存器读(17 族): 从 addr 连续读 count(1-3) 个寄存器。
-        ty: 0=Int8 / 1=Int16 / 2=Int32 / 3=Float。返回 raw 值列表(整数寄存器
-        原值转 float; 物理量标度换算按表1 由调用方完成)。仅 HighTorque。"""
+        2026-10-22 起读取固定按 Int16(ty 参数已删除), 返回**换算后物理量**
+        (位置/速度/加速度 → rad 族, 力矩套型号 k 系数, 电流/电压/温度/PWM/
+        PID 按各自 scale; 无换算关系的寄存器 1:1 返回原值)。仅 HighTorque。
+
+        地址准入(同日追补决策): addr 及 count 覆盖的每个地址都必须在
+        HighTorque 寄存器表内(0x00-0x45 中 xlsx 列出的 43 个)——缺号与
+        表外地址(0x46-0xFF)一律报错(整段拒绝, 不发帧); write 同此规则。
+
+        ⚠ 签名变更(旧 (addr, ty, count)): 旧的按位置传参调用
+        `get_register(0x01, 1, 3)` 会静默变成 (addr=0x01, count=1,
+        timeout_ms=3)——升级脚本时请核对参数位置。"""
         if not 1 <= int(count) <= 3:
             raise ValueError(f"count must be in 1..3, got {count}")
-        if ty not in (0, 1, 2, 3):
-            raise ValueError(f"ty must be 0(Int8)/1(Int16)/2(Int32)/3(Float), got {ty}")
         out = (c_float * count)()
         _ok(
             self._abi.lib.motor_handle_hightorque_get_register(
-                self._require_open(), addr, ty, count, timeout_ms, out
+                self._require_open(), int(addr), int(count), int(timeout_ms), out
             ),
             "hightorque_get_register",
         )
         return [float(v) for v in out]
 
-    def hightorque_request_register(
-        self, addr: int, ty: int = 1, count: int = 1
-    ) -> None:
+    def hightorque_request_register(self, addr: int, count: int = 1) -> None:
         """HighTorque 非阻塞寄存器查询(DM 风格"请求即发送"): 只发 17 族
-        读请求帧, 立即返回不等回帧。回复由 Rust 后台接收线程解码, 按地址
-        写入电机寄存器缓存; 之后 hightorque_get_cached_register 读最近值
-        (非阻塞), 或 hightorque_get_register 阻塞等新鲜值。适合固定频率
-        监测循环: 发完即走, 下一拍读缓存。仅 HighTorque。
-        ty: 0=Int8 / 1=Int16 / 2=Int32 / 3=Float。"""
+        读请求帧(2026-10-22 起固定 Int16, ty 参数已删除), 立即返回不等
+        回帧。地址准入同 hightorque_get_register(须在寄存器表内, 缺号/
+        表外报错)。回复由 Rust 后台接收线程解码, 按地址写入电机寄存器缓存;
+        之后 hightorque_get_cached_register 读最近值(非阻塞, 已换算为
+        物理量), 或 hightorque_get_register 阻塞等新鲜值。适合固定频率
+        监测循环: 发完即走, 下一拍读缓存。仅 HighTorque。"""
         if not 1 <= int(count) <= 3:
             raise ValueError(f"count must be in 1..3, got {count}")
-        if ty not in (0, 1, 2, 3):
-            raise ValueError(f"ty must be 0(Int8)/1(Int16)/2(Int32)/3(Float), got {ty}")
         _ok(
             self._abi.lib.motor_handle_hightorque_request_register(
-                self._require_open(), int(addr), int(ty), int(count)
+                self._require_open(), int(addr), int(count)
             ),
             "hightorque_request_register",
         )
 
     def hightorque_get_cached_register(self, addr: int) -> float | None:
-        """HighTorque 读寄存器缓存最近 raw 值(不发帧不等待)。
-        None = 从未收到过该地址的回复。注意不区分新鲜/陈旧(电机掉线后
-        停留在最后一值); 需要新鲜值用 hightorque_get_register, 或先
+        """HighTorque 读寄存器缓存最近值(不发帧不等待, 已换算为物理量)。
+        None = 从未收到过该地址的回复, 或地址不在寄存器表内(缺号/表外
+        一律 None)。注意不区分新鲜/陈旧(电机掉线后停留在最后一值); 需要
+        新鲜值用 hightorque_get_register, 或先
         hightorque_request_register 发查询、隔一拍回读本缓存。仅 HighTorque。"""
         has = c_uint8(0)
         val = c_float(0.0)
@@ -339,6 +356,8 @@ class Motor:
     def hightorque_write_register(self, addr: int, value: int, config_class: bool = False) -> None:
         """HighTorque 通用寄存器写(05 <addr> <val16>)。config_class=False 走
         控制通道(控制目标类寄存器), True 走扩展 0x8000|id 帧(配置类)。
+        addr 须在 HighTorque 寄存器表内(0x00-0x45 中 xlsx 列出的 43 个,
+        缺号/表外地址报错且不发帧, 与读同规则)。
         模式寄存器 0x000 不适用, 请用 hightorque_set_run_mode。仅 HighTorque。"""
         if not -32768 <= int(value) <= 32767:
             raise ValueError(f"value must fit int16, got {value}")

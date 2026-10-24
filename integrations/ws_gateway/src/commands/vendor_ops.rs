@@ -169,7 +169,7 @@ pub(crate) fn cmd_verify(v: &Value, base: &Target) -> Result<Value, String> {
             let motor = ctrl
                 .add_motor(mid, fid, model)
                 .map_err(|e| e.to_string())?;
-            let _ = motor.request_motor_feedback(Duration::from_millis(timeout_ms));
+            let _ = motor.request_fresh_state(Duration::from_millis(timeout_ms));
             let state = motor
                 .latest_state()
                 .map(|s| json!({"pos": s.pos, "vel": s.vel, "torq": s.torq}));

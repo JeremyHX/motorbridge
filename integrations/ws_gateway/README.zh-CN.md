@@ -344,7 +344,7 @@ or offline joints return `has_value:false` instead of failing the whole request.
 - 参数流：`param_stream` 支持 Damiao 与 RobStride；`damiao_param_stream` / `robstride_param_stream` 是厂商专用别名。
 - RobStride 专属操作：`robstride_ping`、`robstride_read_param`、`robstride_write_param`、`set_active_report`。
 - MyActuator 专属操作：`current`、`pos`、`version`、`mode-query`。
-- HighTorque 专属操作：`read`、`pos_classic`（经典位置 `07 07`，`tqe` 可缺省=无限制）、`version`（固件版本，MyActuator 亦支持）、`read_register`（`17` 族通用寄存器读，`addr/count/ty`）、`torque`（`05 13`，物理量 Nm，支持 continuous）、`dq_voltage`/`dq_current`（模式写+寄存器写拼一帧）、`brake`（模式 15）、`run_mode`（表2 模式切换，真发帧）、`write_register`（`05 <addr> <val16>`）、`periodic_report`（`05 B4`，电机主动状态流）。
+- HighTorque 专属操作：`read`、`pos_classic`（经典位置 `07 07`，`tqe` 可缺省=无限制）、`version`（固件版本，MyActuator 亦支持）、`read_register`（`17` 族通用寄存器读，`addr/count`，2026-10-22 起固定 Int16 并返回换算后物理量）、`torque`（`05 13`，物理量 Nm，支持 continuous）、`dq_voltage`/`dq_current`（模式写+寄存器写拼一帧）、`brake`（模式 15）、`run_mode`（表2 模式切换，真发帧）、`write_register`（`05 <addr> <val16>`）、`periodic_report`（`05 B4`，电机主动状态流）。
 - 后续 V2 可升级为二进制帧，同时保留同一语义。
 
 ## 简易上位机（快速联调）

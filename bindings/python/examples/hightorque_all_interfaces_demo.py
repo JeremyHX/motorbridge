@@ -37,7 +37,8 @@ print-and-continue。差异点见各步注释。
 - ``hightorque_set_run_mode``(01 00 <mode> 显式模式切换;0=停止清错,18 拒绝)
 - ``hightorque_write_register``(05 寄存器写:0x22 前馈扭矩写 0,读回校验)
 - ``hightorque_set_periodic_report``(05 B4 02 周期上报:2c 按文件头开关开
-  10ms 供全程状态刷新,段 12 自含验证停止后冻结)
+  10ms;2026-10-24 起运动段循环内主动 request_feedback 拉状态,本开关仅
+  演示被动上报与段 12 的停止后冻结对比)
 
 与 RS 的关键差异:
 1. HT 协议无 separate 使能帧 / 模式切换帧:控制帧的 cmd 字节即决定模式
@@ -54,8 +55,9 @@ print-and-continue。差异点见各步注释。
 并写闪存。设环境变量 ``HT_EXAMPLE_WRITE_CONFIG=0`` 可跳过(仅测运动、不动配置)。
 
 文件开头另有运行开关(直接改源码常量,段代码不动):``PERIODIC_REPORT_MS``
-控制 [2c] 主动(周期)上报,默认 10ms;置 ``None`` 跳过,运动段读数将冻结
-在 probe 快照。
+控制 [2c] 主动(周期)上报,默认 ``None``=跳过(维护者有意关闭)。2026-10-24
+起运动段循环内主动 request_feedback,读数实时与该开关无关;开关仅演示
+被动上报形式,段 12 自含不受影响。
 """
 from __future__ import annotations
 
@@ -84,9 +86,9 @@ HOLD_SECS = 3.0
 
 # ---- 文件内配置开关(编辑此处定制运行,无需改段代码) ----
 # [2c] 周期上报(主动上报):设整数 = 上报周期 ms(推荐 10);设 None =
-#     跳过 [2c]。控制帧只发不收,运动段状态刷新依赖被动上报——关闭后
-#     get_state 将冻结在 probe 快照(2026-10-08 真机确认)。段 12 自含,
-#     不受本开关影响。
+#     跳过 [2c]。控制帧只发不收,但 2026-10-24 起运动段(_run_hold)
+#     循环内主动 request_feedback 拉状态,读数不再冻结;本开关现仅影响
+#     [2c] 演示段与段 12 的被动观察对比。段 12 自含,不受本开关影响。
 PERIODIC_REPORT_MS: int | None = None
 
 
@@ -162,10 +164,11 @@ def _poll_loop(ctrl: Controller, stop: threading.Event) -> None:
 
 
 def _current_pos(motor) -> float | None:
-    """读当前位置作运动起点。vendor 2026-09-30 起给状态缓存加了序号
-    (state_seq):poll 线程抢到回复时 request_feedback 也能正常返回,
-    不再假性 Timeout;下方 catch CallError 仅作兜底。无反馈返回 None
-    ——调用方应跳过运动,避免绝对位置命令致大幅运动。"""
+    """读当前位置作运动起点。request_feedback 2026-10-23 起为 DM 语义
+    非阻塞(2026-10-24 起连发两帧: 17 01 位置/速度/力矩 + 16 0E 温度/
+    错误码,发完即返回,不抛 Timeout);下方 catch CallError 仅兜底
+    总线级错误。发完 sleep 一拍等回帧入缓,再 get_state 取值。无反馈
+    返回 None——调用方应跳过运动,避免绝对位置命令致大幅运动。"""
     try:
         motor.request_feedback()
     except CallError:
@@ -177,9 +180,13 @@ def _current_pos(motor) -> float | None:
 
 def _run_all(motor, write_config: bool) -> None:
     # 1. 设备探测:HT 无 ping,以 request_feedback + get_state 代替(RS 用 robstride_ping)。
-    #    request_feedback 发 0x17 0x01 查询后由 wait_status 等回复;与后台 poll
-    #    线程的抢帧问题已由 vendor state_seq(2026-09-30)修复——poll 抢到回帧
-    #    时 wait_status 同样返回成功。catch 仅为总线异常兜底,以 get_state 判定。
+    #    request_feedback(ABI 层)2026-10-23 起为 DM 语义非阻塞,2026-10-24 起连发
+    #    两帧 2 字节查询(17 01 位置/速度/力矩 + 16 0E 温度/错误码;真机实测
+    #    固件一帧一对,总耗时 ~1ms)即返回,回帧由后台 poll 线程入缓——
+    #    27 01 回帧锚定一次状态计数,26 0E 就地补丁 t_mos/fault_code(不推进
+    #    计数)。掉线不再表现为 Timeout 报错,而是 get_state 返回 None(从未
+    #    收到)或冻结旧值;需要严格新鲜度判定用 get_state_snapshot 的
+    #    received_at 时间戳。catch 仅兜底总线级错误。
     try:
         motor.request_feedback()
     except CallError as exc:
@@ -196,24 +203,25 @@ def _run_all(motor, write_config: bool) -> None:
     except CallError as exc:
         print(f"[2.clear_error] 失败: {exc}(继续)")
 
-    # 2b. 只读诊断(无运动):通用寄存器读(17 族,0x01-0x03 = 位置/速度/
-    #     转矩 int16,raw 值,物理换算按寄存器表)。
+    # 2b. 只读诊断(无运动):通用寄存器读(17 族,固定 Int16,0x01-0x03 =
+    #     位置/速度/转矩,返回换算后物理量:rad / rad/s / N·m)。
     try:
-        vals = motor.hightorque_get_register(0x01, ty=1, count=3)
-        print(f"[2b.read_reg] 0x01-0x03 raw={vals}")
+        vals = motor.hightorque_get_register(0x01, count=3)
+        print(f"[2b.read_reg] 0x01-0x03 物理 pos={vals[0]:+.4f}rad vel={vals[1]:+.4f}rad/s torq={vals[2]:+.4f}N·m")
     except CallError as exc:
         print(f"[2b.read_reg] 失败: {exc}(继续)")
 
     # 2c. 周期上报开启(05 B4 02 <t>,扩展帧):可选——由文件开头
-    #     PERIODIC_REPORT_MS 开关控制。控制帧只发不收,若不开上报,
-    #     运动段 get_state 将停留在 probe 快照——2026-10-08 真机确认
-    #     (电机正常运动而读数全程冻结)。开启后电机主动发 27 01 状态帧,
-    #     由后台 poll 线程吃进,运动段读数实时。段 12 自含,不受本开关影响。
+    #     PERIODIC_REPORT_MS 开关控制。控制帧只发不收;2026-10-24 起
+    #     运动段(_run_hold)循环内主动 request_feedback 拉状态,读数
+    #     不再依赖本开关。开启后电机按周期主动发 27 01 状态帧,由后台
+    #     poll 线程吃进——演示"电机主动推"的形式,与运动段的"主机主动
+    #     拉"形成对照。段 12 自含,不受本开关影响。
     if PERIODIC_REPORT_MS is not None and PERIODIC_REPORT_MS > 0:
         motor.hightorque_set_periodic_report(PERIODIC_REPORT_MS)
-        print(f"[2c.periodic_report] {PERIODIC_REPORT_MS}ms 被动上报开启(运动段状态刷新依赖)")
+        print(f"[2c.periodic_report] {PERIODIC_REPORT_MS}ms 被动上报开启(电机主动推)")
     else:
-        print("[2c.periodic_report] 跳过(PERIODIC_REPORT_MS=None):运动段读数将冻结在 probe 快照")
+        print("[2c.periodic_report] 跳过(PERIODIC_REPORT_MS=None):运动段由循环内 request_feedback 主动拉")
 
     # 3. 模式选择:ensure_mode 统一接口(HT 仅校验 mode<=17,不写寄存器)。
     #    HT 协议无 separate 使能帧,故不调 enable()(RS 此处会 enable 闭合力矩)。
@@ -340,11 +348,13 @@ def _run_all(motor, write_config: bool) -> None:
     # 11. 寄存器写(05 <addr> <val16>):0x22 前馈扭矩写 0(可逆、零副作用),
     #     随即 17 族读回校验往返。控制类寄存器走标准控制通道
     #     (config_class=False);int16 越界在 Python 层直接拒绝。
+    #     注意读写不对称: 写 raw i16, 读回的是换算后物理量(N·m, 套
+    #     型号 k 系数)——写 0 读回 0.0 即往返一致。
     motor.hightorque_write_register(0x22, 0)
     time.sleep(0.05)
     try:
-        vals = motor.hightorque_get_register(0x22, ty=1)
-        print(f"[11.WRITE_REG] 0x22 前馈扭矩 写0 读回 raw={vals}")
+        vals = motor.hightorque_get_register(0x22)
+        print(f"[11.WRITE_REG] 0x22 前馈扭矩 写0 读回物理量={vals[0]:+.4f}N·m")
     except CallError as exc:
         print(f"[11.WRITE_REG] 读回失败: {exc}(继续)")
     try:
@@ -404,7 +414,13 @@ def _stop_and_disable(motor) -> None:
 
 
 def _run_hold(motor, label: str, secs: float, cmd: Callable[[float], None]) -> None:
-    """运行 ``secs`` 秒,每周期发一次命令,~100ms 打印一次 ``get_state()``。"""
+    """运行 ``secs`` 秒,每周期发一次命令,~100ms 打印一次 ``get_state()``。
+
+    2026-10-24:控制帧不产生状态回帧(真机复证),循环内每周期
+    ``request_feedback()`` 主动拉状态(两帧 17 01 + 16 0E,~10ms 周期
+    ≈ 100Hz 查询,回帧由后台 poll 线程入缓)——打印读到的是 ≤10ms
+    前的缓存快照。掉线时 get_state 冻结旧值,查询失败静默(CallError
+    仅总线级错误)。"""
     start = time.monotonic()
     last_print = start
     while time.monotonic() - start < secs:
@@ -414,6 +430,10 @@ def _run_hold(motor, label: str, secs: float, cmd: Callable[[float], None]) -> N
         except Exception as exc:  # noqa: BLE001
             print(f"[{label}] 命令失败: {exc}")
             break
+        try:
+            motor.request_feedback()
+        except CallError:
+            pass
         if time.monotonic() - last_print >= 0.1:
             last_print = time.monotonic()
             print(f"[{label}] t={t:.2f} {_fmt_state(motor.get_state())}")

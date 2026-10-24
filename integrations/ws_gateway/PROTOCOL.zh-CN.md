@@ -976,7 +976,7 @@ Hexfellow mode：
 | RobStride | poll feedback once |
 | Hexfellow | poll feedback once |
 | MyActuator | request status 后 poll |
-| HighTorque | vendor `request_motor_feedback` + `latest_state`（17 01 查询等待，回帧物理量带力矩系数补偿） |
+| HighTorque | vendor `request_motor_feedback` + `latest_state`（2026-10-24 起连发两帧：17 01 位置/速度/力矩 + 16 0E 温度/错误码，非阻塞；回帧物理量带力矩系数补偿，26 0E 回帧就地补丁 t_mos/fault_code 不推进状态计数） |
 
 请求：
 
@@ -1389,25 +1389,28 @@ continuous 活动指令。力矩按型号自适应补偿。
 
 ### 14.3 `read_register` / `read-register`
 
-作用：HighTorque 通用寄存器读取（`0x17` 族）。返回原始值；物理量标度
-换算按寄存器功能表由调用方完成。
+作用：HighTorque 通用寄存器读取（`0x17` 族）。2026-10-22 起读取**固定按
+Int16**（`ty` 字段已删除——报文显式携带 `ty` 直接报错，不静默忽略），返回
+**换算后物理量**（按 vendor 寄存器表 quantity 归类：位置/速度/加速度→rad 族、
+力矩套型号 k 系数、电流/电压/温度/PWM/PID 按各自 scale；无换算关系的表内
+寄存器 1:1 返回原值）。每行 `name`/`unit` 按该行自身地址查寄存器表。
 
-数据类型 `ty`：报文显式指定优先；否则回落寄存器表中已核实的类型；
-两者皆无则报错（规范表未覆盖所有寄存器类型，盲读会按错误宽度解码）。
+**地址准入（2026-10-22 追补决策）**：`addr` 合法域为**寄存器表内地址**
+（0x00-0x45 中 xlsx 列出的 43 个；缺号与表外地址一律整段报错、零发帧——
+`count` 覆盖的任一地址不在表内即整段拒绝）。`write_register` 同此规则。
 
 参数：
 
 | 字段 | 类型 | 默认值 | 作用 |
 | --- | --- | --- | --- |
-| `addr` | u8 | 必填 | 寄存器地址（0x00-0x45） |
-| `count` | u8 | `1` | 连续读取个数，1-3 |
-| `ty` | u8 | 寄存器表 | `0`=Int8 / `1`=Int16 / `2`=Int32 / `3`=Float |
+| `addr` | u8 | 必填 | 寄存器地址（须在寄存器表内；数值越 0x00-0xFF 拒绝，表外/缺号亦拒绝） |
+| `count` | u8 | `1` | 连续读取个数，1-3（覆盖任一非表内地址即整段拒绝） |
 | `timeout_ms` | u64 | `500` | 读取超时 |
 
 请求：
 
 ```json
-{"op":"read_register","addr":1,"count":3,"ty":1}
+{"op":"read_register","addr":1,"count":3}
 ```
 
 返回：
@@ -1415,8 +1418,11 @@ continuous 活动指令。力矩按型号自适应补偿。
 ```json
 {
   "op":"read_register","vendor":"hightorque","addr":1,"count":3,
-  "name":"位置","type":"i16",
-  "registers":[{"addr":1,"value":0},{"addr":2,"value":0},{"addr":3,"value":0}]
+  "registers":[
+    {"addr":1,"name":"位置","unit":"rad","value":0.0},
+    {"addr":2,"name":"速度","unit":"rad/s","value":0.0},
+    {"addr":3,"name":"转矩","unit":"N·m","value":0.0}
+  ]
 }
 ```
 

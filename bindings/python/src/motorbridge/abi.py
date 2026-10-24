@@ -197,12 +197,14 @@ class Abi:
         lib.motor_handle_hightorque_send_pos_vel_acc.restype = c_int32
         lib.motor_handle_hightorque_send_pos_classic.argtypes = [c_void_p, c_float, c_float]
         lib.motor_handle_hightorque_send_pos_classic.restype = c_int32
+        # 2026-10-22: hightorque_get_register / request_register 删除 ty 参数
+        # (读取固定 Int16), 返回换算后物理量。
         lib.motor_handle_hightorque_get_register.argtypes = [
-            c_void_p, c_uint8, c_uint8, c_uint8, c_uint32, POINTER(c_float)
+            c_void_p, c_uint8, c_uint8, c_uint32, POINTER(c_float)
         ]
         lib.motor_handle_hightorque_get_register.restype = c_int32
         lib.motor_handle_hightorque_request_register.argtypes = [
-            c_void_p, c_uint8, c_uint8, c_uint8
+            c_void_p, c_uint8, c_uint8
         ]
         lib.motor_handle_hightorque_request_register.restype = c_int32
         lib.motor_handle_hightorque_get_cached_register.argtypes = [

@@ -5,7 +5,6 @@ use crate::commands::{
 use crate::model::{ControllerHandle, MotorHandle};
 use crate::session::SessionCtx;
 use crate::vendors::damiao_ws::ensure_control_mode_soft;
-use motor_vendor_hightorque::{ReadCmd, RegisterType};
 use motor_vendor_robstride::ParameterValue as RobstrideParameterValue;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -168,15 +167,12 @@ fn handle_request_feedback(v: &Value, ctx: &mut SessionCtx) -> Result<Value, Str
         (Some(ControllerHandle::Hightorque(_)), Some(MotorHandle::Hightorque(m))) => {
             // 收敛(2026-10-12):命令 8(读状态)是命令 7(通用寄存器读)的
             // 特例——17 01 状态查询 = 读 0x01 起 3 个 int16。非阻塞"发完即走"
-            // 走 DM 风格 request_registers(原 request_motor_feedback_async 删除),
-            // 回帧由 vendor 后台收帧线程解码,同时写入状态与寄存器两个缓存,
-            // state_once/poll 与 cached_register 均可读回。
-            m.request_registers(&[ReadCmd {
-                addr: 0x01,
-                ty: RegisterType::Int16,
-                count: 3,
-            }])
-            .map_err(|e| e.to_string())?;
+            // 走 vendor 同名方法(2026-10-24 起连发两帧:17 01 + 16 0E
+            // 温度/错误码;真机实测固件一帧一对),回帧由 vendor 后台收帧
+            // 线程解码,同时写入状态与寄存器两个缓存,26 0E 回帧就地补丁
+            // t_mos/fault_code(不推进状态计数),state_once/poll 与
+            // cached_register 均可读回。
+            m.request_motor_feedback().map_err(|e| e.to_string())?;
         }
         _ => return Err("motor not connected".to_string()),
     }
