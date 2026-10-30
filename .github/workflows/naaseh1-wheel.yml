@@ -2,8 +2,8 @@ name: naaseh1 wheel
 
 # This fork carries one fix on top of v0.5.2 (the RobStride parameter read
 # returns when its reply is stored) until upstream releases it. It builds only
-# the wheel naaseh1 installs: CPython 3.12, manylinux aarch64, on a native ARM
-# runner. The build steps mirror v0.5.2's pypi-publish.yml. Upstream's publish
+# the wheels naaseh1 installs: CPython 3.12, manylinux x86_64 and aarch64, each
+# on a native runner. The build steps mirror v0.5.2's pypi-publish.yml. Upstream's publish
 # workflows are removed on this branch so a tag or release here never publishes.
 
 on:
@@ -16,8 +16,17 @@ permissions:
   contents: read
 
 jobs:
-  build-linux-aarch64:
-    runs-on: ubuntu-24.04-arm
+  build-linux:
+    name: build-linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,8 +41,8 @@ jobs:
 
       - name: Build wheel
         env:
-          CIBW_BUILD: "cp312-manylinux_aarch64"
-          CIBW_ARCHS_LINUX: aarch64
+          CIBW_BUILD: "cp312-manylinux_${{ matrix.arch }}"
+          CIBW_ARCHS_LINUX: ${{ matrix.arch }}
           CIBW_BUILD_FRONTEND: pip
           CIBW_ENVIRONMENT_LINUX: MOTORBRIDGE_LIB=/project/target/release/libmotor_abi.so MOTORBRIDGE_WS_GATEWAY_BIN=/project/target/release/ws_gateway MOTOR_DM_DEVICE_BUNDLE=0
           CIBW_BEFORE_ALL_LINUX: >
@@ -51,6 +60,6 @@ jobs:
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-cp312-linux-aarch64
+          name: wheel-cp312-linux-${{ matrix.arch }}
           path: dist/*.whl
           if-no-files-found: error
